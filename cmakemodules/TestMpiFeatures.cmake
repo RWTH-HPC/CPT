@@ -35,7 +35,7 @@ macro (set_mpi_test_features)
     endif()
 
     execute_process(
-        COMMAND         bash "-c" "${CMAKE_C_COMPILER} ${mpi_include_flag} -E -P ${OTFCPT_SOURCE_DIR}/cmakemodules/mpi_implementation_version.c"
+        COMMAND         bash "-c" "${CMAKE_C_COMPILER} ${mpi_include_flag} -E -P ${CPT_SOURCE_DIR}/cmakemodules/mpi_implementation_version.c"
         OUTPUT_VARIABLE mpi_implementation_version_output
     )
 

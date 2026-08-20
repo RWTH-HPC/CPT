@@ -25,7 +25,7 @@ PARSE_FLAG(bool, start_with_library_constructor, false,
 PARSE_FLAG(bool, dump_on_stop, false, "Print output on stop.")
 
 PARSE_FLAG(bool, barrier, false,
-           "Synchronize start of measurement with an MPI_Barrier.")
+           "Synchronize start and stop of measurement with an MPI_Barrier.")
 
 PARSE_FLAG(bool, colorize, true, "Colorize output.")
 

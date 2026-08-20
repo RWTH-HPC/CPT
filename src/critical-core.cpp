@@ -194,7 +194,11 @@ void finishMeasurement() {
   thread_local_clock->setState(endProgrammTime, STATE_INIT, __func__);
 
   double totalRuntimeReal = endProgrammTime - startProgrammTime;
-  printf("runtime flag: %lf, %lf\n", totalRuntimeReal, analysis_flags->runtime);
+  if (analysis_flags->verbose) {
+    printf("runtime flag: %lf, %lf\n", totalRuntimeReal,
+           analysis_flags->runtime);
+  }
+
   if (analysis_flags->runtime > 0)
     totalRuntimeReal = analysis_flags->runtime;
   // get max and avg Computation accross all threads
@@ -407,9 +411,8 @@ void finishMeasurement() {
               maxComputation[2]);
       fprintf(of, "=> Max crit. Outside OpenMP (in s): %6.3lf\n",
               totalOutsideOMPIdeal);
-      fprintf(of, "=> Total runtime (in s):         %6.3lf\n",
-              totalRuntimeReal);
     }
+    fprintf(of, "=> Total runtime (in s):         %6.3lf\n", totalRuntimeReal);
 
     fprintf(of, "\n----------------POP metrics----------------\n");
     fprintf(of, "Parallel Efficiency:                %6.3lf\n",
