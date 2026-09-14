@@ -132,6 +132,12 @@ debian:
       - module purge
       - module load "${TOOLCHAIN}/${VERSION}"
       - module load Python
+      - |
+        if [[ "${TOOLCHAIN}" == "iimpi" && "${VERSION}" == "2023b" ]]; then
+          module load CMake/3.27.6
+        else
+          module load CMake
+        fi
       - >-
         if [[ "${COMPILER}" == *"Clang"* ]]; then
           module load Clang
