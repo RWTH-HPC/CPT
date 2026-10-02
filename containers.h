@@ -3,8 +3,9 @@
 
 #include "debug.h"
 #include "typedefs.h"
+#include <initializer_list>
 
-namespace __otfcpt {
+namespace cpt {
 
 template <typename T> struct Hash {
   size_t operator()(T __val) const noexcept {
@@ -16,6 +17,98 @@ template <typename T> struct Hash<T *> {
   size_t operator()(T *__val) const noexcept {
     auto tmp = reinterpret_cast<size_t>(__val);
     return tmp + (tmp >> 5);
+  }
+};
+
+template <typename T, std::size_t N> class Array {
+protected:
+  T begin_[N]{}; // zero‑initialized (if T is POD)
+public:
+  constexpr Array() = default;
+  // -------------------------------------------------
+  // list constructor
+  // -------------------------------------------------
+  //  Not declared as `explicit`, so that
+  //  copy‑list‑initialization (`Array a = {…}`) works.
+  Array(std::initializer_list<T> init) noexcept {
+    DCHECK_LE(init.size(), N);
+
+    // Copy values from initializer list to the internal
+    size_t i = 0;
+    for (auto elem : init) {
+      begin_[i++] = elem;
+    }
+
+    // Init remaining elements to default initializer
+    for (i = init.size(); i < N; i++) {
+      begin_[i] = T{};
+    }
+  }
+
+  constexpr std::size_t size() const { return N; }
+  constexpr T *data() { return begin_; }
+  constexpr const T *data() const { return begin_; }
+  constexpr T *begin() { return begin_; }
+  constexpr const T *begin() const { return begin_; }
+  constexpr T *end() { return begin_ + N; }
+  constexpr const T *end() const { return begin_ + N; }
+  constexpr const T &operator[](uptr i) const {
+    DCHECK_LT(i, N);
+    return begin_[i];
+  }
+  constexpr T &operator[](uptr i) {
+    DCHECK_LT(i, N);
+    return begin_[i];
+  }
+  /* -------------------------------------------------
+        operator+=  --  elementwise addition
+       ------------------------------------------------- */
+  // only activ, if both elements have same base type
+  template <typename U>
+  constexpr std::enable_if_t<std::is_same_v<T, U>, Array &> operator+=(
+      const Array<U, N> &rhs) noexcept(std::is_nothrow_assignable_v<T &, T>) {
+    // std::transform might be elegant, but a simple loop avoids dependency to
+    // <algorithm>.
+    for (std::size_t i = 0; i < N; ++i) {
+      begin_[i] += rhs.begin_[i];
+    }
+    return *this;
+  }
+  /* -------------------------------------------------
+    operator+ --  using operator+=
+   ------------------------------------------------- */
+  // implemented as non-member function, so that
+  // lhs and rhs can be implizitly converted.
+  template <typename U>
+  friend constexpr std::enable_if_t<std::is_same_v<T, U>, Array<T, N>>
+  operator+(Array<T, N> lhs, const Array<U, N> &rhs) noexcept {
+    lhs += rhs; // using above += operator
+    return lhs; // Return‑By‑Value (RVO / NRVO)
+  }
+  /* -------------------------------------------------
+          operator-=  --  elementwise substraction
+         ------------------------------------------------- */
+  // only activ, if both elements have same base type
+  template <typename U>
+  constexpr std::enable_if_t<std::is_same_v<T, U>, Array &> operator-=(
+      const Array<U, N> &rhs) noexcept(std::is_nothrow_assignable_v<T &, T>) {
+    // std::transform might be elegant, but a simple loop avoids dependency to
+    // <algorithm>.
+    for (std::size_t i = 0; i < N; ++i) {
+      begin_[i] -= rhs.begin_[i];
+    }
+    return *this;
+  }
+  /* -------------------------------------------------
+    operator- --  using operator-=
+   ------------------------------------------------- */
+  // implemented as non-member function, so that
+  // lhs and rhs can be implizitly converted.
+  template <typename U>
+  friend constexpr std::enable_if_t<std::is_same_v<T, U>, Array<T, N>>
+  operator-(Array<T, N> lhs, const Array<U, N> &rhs) noexcept {
+    lhs -= rhs; // using above -= operator
+    return lhs; // Return‑By‑Value (RVO / NRVO)
   }
 };
 
@@ -120,6 +213,17 @@ public:
 
   void operator delete(void *p) { free(p); }
 
+  Vector(std::initializer_list<T> init)
+      : begin_(nullptr), end_(nullptr), last_(nullptr) {
+    // Allocate enough space for all elements
+    EnsureSize(init.size());
+
+    // Copy the elements from the initializer list into vector
+    for (const T &value : init) {
+      *end_++ = value;
+    }
+  }
+
 protected:
   T *begin_;
   T *end_;
@@ -171,10 +275,7 @@ public:
   using const_iterator = const I *;
   CompactHashMap() {}
 
-  ~CompactHashMap() {
-    if (begin_)
-      free(begin_);
-  }
+  ~CompactHashMap() { Reset(); }
 
   // Default copy constructor would lead to double-free
   CompactHashMap(const CompactHashMap &) = delete;
@@ -349,6 +450,6 @@ struct CptStreamBuffer {
   }
 };
 
-} // namespace __otfcpt
+} // namespace cpt
 
 #endif

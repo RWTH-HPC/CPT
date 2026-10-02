@@ -1,6 +1,6 @@
 #include "parse_flags.h"
 
-using namespace __otfcpt;
+using namespace cpt;
 
 class UnknownFlags {
   static const int kMaxUnknownFlags = 20;
@@ -26,7 +26,7 @@ public:
 
 UnknownFlags unknown_flags;
 
-void __otfcpt::ReportUnrecognizedFlags() { unknown_flags.Report(); }
+void cpt::ReportUnrecognizedFlags() { unknown_flags.Report(); }
 
 char *FlagParser::ll_strndup(const char *s, uptr n) {
   uptr len = strnlen(s, n);
@@ -164,40 +164,40 @@ FlagParser::~FlagParser() {
     free(ptr);
 }
 
-OtfcptFlags *__otfcpt::otfcpt_flags_dont_use{nullptr};
-const char *__otfcpt::SanitizerToolName = "OFTCPT";
+CptFlags *cpt::cpt_flags_dont_use{nullptr};
+const char *cpt::SanitizerToolName = "OFTCPT";
 
-void OtfcptFlags::SetDefaults() {
+void CptFlags::SetDefaults() {
 #define PARSE_FLAG(Type, Name, DefaultValue, Description) Name = DefaultValue;
 #include "parse_flags.inc"
 #undef PARSE_FLAG
 }
 
-void OtfcptFlags::CopyFrom(const OtfcptFlags &other) {
+void CptFlags::CopyFrom(const CptFlags &other) {
   memcpy(this, &other, sizeof(*this));
 }
 
-static void RegisterOtfcptFlags(FlagParser *parser, OtfcptFlags *f){
+static void RegisterCptFlags(FlagParser *parser, CptFlags *f){
 #define PARSE_FLAG(Type, Name, DefaultValue, Description)                      \
   RegisterFlag(parser, #Name, Description, &f->Name);
 #include "parse_flags.inc"
 #undef PARSE_FLAG
 }
 
-SANITIZER_INTERFACE_WEAK_DEF(const char *, __otfcpt_default_options, void) {
+SANITIZER_INTERFACE_WEAK_DEF(const char *, cpt_default_options, void) {
   return "";
 }
 
-void __otfcpt::InitializeOtfcptFlags() {
-  if (__otfcpt::otfcpt_flags_dont_use)
+void cpt::InitializeCptFlags() {
+  if (cpt::cpt_flags_dont_use)
     return;
-  OtfcptFlags *f = __otfcpt::otfcpt_flags_dont_use = new OtfcptFlags;
+  CptFlags *f = cpt::cpt_flags_dont_use = new CptFlags;
   f->SetDefaults();
 
   auto &parser = f->parser;
-  RegisterOtfcptFlags(&parser, f);
+  RegisterCptFlags(&parser, f);
 
-  parser.ParseString(__otfcpt_default_options());
+  parser.ParseString(cpt_default_options());
   parser.ParseStringFromEnv(ANALYSIS_FLAGS);
 
   ReportUnrecognizedFlags();

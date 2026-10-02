@@ -1,7 +1,7 @@
 ! ALLOW_RETRIES: 1
-! RUN: %mpirunnp 2 %load_otfcpt %otfcpt_options_dump_stopped %t | %FileCheck \
+! RUN: %mpirunnp 2 %load_cpt %cpt_options_dump_stopped %t | %FileCheck \
 ! RUN: --check-prefixes=CHECK2,CHECK %metricfile
-! RUN: %mpirunnp 4 %load_otfcpt %otfcpt_options_dump_stopped %t | %FileCheck \
+! RUN: %mpirunnp 4 %load_cpt %cpt_options_dump_stopped %t | %FileCheck \
 ! RUN: --check-prefixes=CHECK4,CHECK %metricfile
 ! REQUIRES: Fortran
 

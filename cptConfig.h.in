@@ -1,0 +1,16 @@
+/**
+* @file cptConfig.h
+*       Header with configuration defines.
+*
+* @date 24.10.2025
+* @author Ben Thärigen
+*/
+
+#ifndef CPTCONFIG_H
+#define CPTCONFIG_H
+
+/* Define for maximum number of dependent metrics to be tracked alongside the CP */
+#define NUM_UC_INT64 @NUM_DEP_INT_METRICS@
+#define NUM_UC_DOUBLE @NUM_DEP_DBL_METRICS@
+
+#endif /* CPTCONFIG_H */

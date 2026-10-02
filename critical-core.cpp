@@ -13,11 +13,16 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "containers.h"
 #include "criticalPath.h"
 #include "errorhandler.h"
 #include "parse_flags.h"
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <omp.h>
 #include <time.h>
+#include <unistd.h>
 #ifdef USE_MPI
 #include <mpi.h>
 #endif
@@ -78,9 +83,15 @@ void init_signalhandlers() {
 double localTimeOffset{0};
 long long startTimeOffset{0};
 double getTime() {
+#ifdef NOTIME
+  static thread_local double time = 0;
+  time += .1;
+  return time;
+#else
   struct timespec curr;
   clock_gettime(CLOCK_REALTIME, &curr);
   return curr.tv_sec - startTimeOffset + curr.tv_nsec * 1e-9 - localTimeOffset;
+#endif
 }
 
 int myProcId = 0;
@@ -100,11 +111,11 @@ template <> UniqLock<DependentMetric>::UniqLock(std::mutex &m) : u(m) {}
 template <> UniqLock<TimeMetric>::UniqLock(std::mutex &m) : u() {}
 
 double totalProgrammTime = 0;
-double startProgrammTime = getTime(), endProgrammTime;
+double startProgrammTime = getTime(), endProgrammTime = startProgrammTime;
 double crit_path_useful_time = 0;
 
 Vector<THREAD_CLOCK *> *thread_clocks = nullptr;
-Vector<omptCounts *> *thread_counts = nullptr;
+Vector<omptCounts<double> *> *thread_counts = nullptr;
 thread_local THREAD_CLOCK *thread_local_clock = nullptr;
 
 const char *debug_clock_state_string[] = {
@@ -129,13 +140,6 @@ DebugClocksRAII::~DebugClocksRAII() {
   fflush(analysis_flags->output);
 }
 #endif
-
-void resetMpiClock(THREAD_CLOCK *thread_clock) {
-  // Make sure MPI clock is not started
-  DCHECK_OR(thread_clock->getState() == STATE_MPI,
-            thread_clock->getState() == STATE_INIT);
-  thread_clock->clocks[CLOCK_OMPI].Reset(0);
-}
 
 void enterOpenMP(const char *loc) {
   thread_local_clock->enterState(STATE_OMP, loc);
@@ -165,75 +169,96 @@ double atomic_add<double>(std::atomic<double> &operand, double value_to_add) {
   return desired;
 }
 
-#define NUM_SHARED_METRICS 7
+// different types of averages and maximum. Here: over all threads, over all
+// processes
+#define NUM_SHARED_METRICS 2
 
-void finishMeasurement() {
-  static int finished = 0;
-  if (finished)
-    return;
-  finished = 1;
-  int number_of_procs = 1;
-  int total_threads = 0;
+void calculate_average_and_max(
+    Vector<THREAD_CLOCK *> &clocks, double totalRuntimeReal,
+    double (&avgComputation)[NUM_SHARED_METRICS],
+    double (&maxComputation)[NUM_SHARED_METRICS],
+    double (&avgIntDepVals)[NUM_SHARED_METRICS][NUM_UC_INT64],
+    int (&maxIntDepVals)[NUM_SHARED_METRICS][NUM_UC_INT64],
+    double (&avgDoubleDepVals)[NUM_SHARED_METRICS][NUM_UC_DOUBLE],
+    double (&maxDoubleDepVals)[NUM_SHARED_METRICS][NUM_UC_DOUBLE],
+    int &number_of_procs, int &total_threads, MPI_COUNTS &total_counts) {
+  number_of_procs = 1;
+  total_threads = 0;
   int num_threads = 0;
-  if (thread_clocks)
-    total_threads = num_threads = thread_clocks->Size();
 
-  double avgComputation[NUM_SHARED_METRICS] = {0};
-  double maxComputation[NUM_SHARED_METRICS] = {0};
+  total_threads = num_threads = clocks.Size();
+  bool initialConsidered = false;
+
   double uc_avg[NUM_SHARED_METRICS] = {0};
   double uc_max[NUM_SHARED_METRICS] = {0};
+  // for dep metrics
+#if NUM_UC_INT64 > 0
+  int uc_int_dep_avg[NUM_SHARED_METRICS][NUM_UC_INT64] = {{0}};
+  int uc_int_dep_max[NUM_SHARED_METRICS][NUM_UC_INT64] = {{0}};
+#endif
+#if NUM_UC_DOUBLE > 0
+  double uc_dbl_dep_avg[NUM_SHARED_METRICS][NUM_UC_DOUBLE] = {{0}};
+  double uc_dbl_dep_max[NUM_SHARED_METRICS][NUM_UC_DOUBLE] = {{0}};
+#endif
 
-  // STATE_INIT to stop clock
-  thread_local_clock->setState(endProgrammTime, STATE_INIT, __func__);
+  MPI_COUNTS proc_counts;
+  for (int i = 0; i < num_threads; i++) {
+    bool isInitial = ((*thread_clocks)[i]->thread_type == ompt_thread_initial);
+    if (initialConsidered && isInitial)
+      continue;
+    if (isInitial)
+      initialConsidered = true;
+    auto *tclock = (clocks)[i];
+    proc_counts.add(*tclock);
+    double curr_uc = tclock->clocks[CLOCK_USEFUL].thread.getTime();
+#if NUM_UC_INT64 > 0
+    Array<uint64_t, NUM_UC_INT64> *curr_int_uc =
+        tclock->clocks[CLOCK_USEFUL].thread.getIntDeps();
+#endif
+#if NUM_UC_DOUBLE > 0
+    Array<double, NUM_UC_DOUBLE> *curr_dbl_uc =
+        tclock->clocks[CLOCK_USEFUL].thread.getDoubleDeps();
+#endif
 
-  if (analysis_flags->running) {
-    endProgrammTime = getTime();
-    analysis_flags->running = false;
-  }
-
-  double totalRuntimeReal = endProgrammTime - startProgrammTime;
-  printf("runtime flag: %lf, %lf\n", totalRuntimeReal, analysis_flags->runtime);
-  if (analysis_flags->runtime > 0)
-    totalRuntimeReal = analysis_flags->runtime;
-  // get max and avg Computation accross all threads
-  MPI_COUNTS proc_counts, total_counts;
-  if (num_threads > 0) {
-    for (int i = 0; i < num_threads; i++) {
-      auto *tclock = (*thread_clocks)[i];
-      // STATE_INIT to stop all clocks
-      if (tclock->getState() != STATE_INIT)
-        tclock->setState(endProgrammTime, STATE_INIT, __func__);
-      proc_counts.add(*tclock);
-      double curr_uc = tclock->clocks[CLOCK_USEFUL].thread.getTime();
-      double curr_oot = tclock->clocks[CLOCK_OOMP].thread.getTime();
-      if (curr_uc > uc_max[0]) {
-        uc_max[0] = curr_uc;
+    if (curr_uc > uc_max[0]) {
+      uc_max[0] = curr_uc;
+#if NUM_UC_INT64 > 0
+      for (int j = 0; j < NUM_UC_INT64; j++) {
+        uc_int_dep_max[0][j] = (*curr_int_uc)[j];
       }
-      if (curr_oot > uc_max[2]) {
-        uc_max[2] = curr_oot;
+#endif
+#if NUM_UC_DOUBLE > 0
+      for (int j = 0; j < NUM_UC_DOUBLE; j++) {
+        uc_dbl_dep_max[0][j] = (*curr_dbl_uc)[j];
       }
-      uc_avg[0] += curr_uc;
-      uc_avg[2] += curr_oot;
+#endif
     }
-    if (thread_counts)
-      for (int i = 1; i < thread_counts->Size(); i++)
-        (*thread_counts)[0]->add(*(*thread_counts)[i]);
-  } else {
-    num_threads = 1;
-    uc_max[0] = uc_avg[0] =
-        thread_local_clock->clocks[CLOCK_USEFUL].thread.getTime();
-    uc_max[2] = uc_avg[2] =
-        thread_local_clock->clocks[CLOCK_OOMP].thread.getTime();
-    proc_counts.add(*thread_local_clock);
+    uc_avg[0] += curr_uc;
+#if NUM_UC_INT64 > 0
+    for (int j = 0; j < NUM_UC_INT64; j++) {
+      uc_int_dep_avg[0][j] += (*curr_int_uc)[j];
+    }
+#endif
+#if NUM_UC_DOUBLE > 0
+    for (int j = 0; j < NUM_UC_DOUBLE; j++) {
+      uc_dbl_dep_avg[0][j] += (*curr_dbl_uc)[j];
+    }
+#endif
   }
-  uc_max[1] = uc_avg[1] = thread_local_clock->clocks[CLOCK_OMPI].proc.getTime();
-  uc_max[3] = uc_avg[3] =
-      thread_local_clock->clocks[CLOCK_USEFUL].proc.getTime();
-  uc_max[4] = uc_avg[4] = thread_local_clock->clocks[CLOCK_OOMP].proc.getTime();
-  uc_max[5] = uc_avg[5] = uc_avg[3] - uc_avg[4];
-  uc_avg[5] = uc_avg[5] * num_threads;
-  uc_max[6] = uc_max[0];
-  uc_avg[6] = uc_max[0] * num_threads;
+
+  uc_max[1] = uc_avg[1] = (clocks)[0]->clocks[CLOCK_USEFUL].proc.getTime();
+#if NUM_UC_INT64 > 0
+  for (int j = 0; j < NUM_UC_INT64; j++) {
+    uc_int_dep_max[1][j] = uc_int_dep_avg[1][j] =
+        (*((clocks)[0]->clocks[CLOCK_USEFUL].proc.getIntDeps()))[j];
+  }
+#endif
+#if NUM_UC_DOUBLE > 0
+  for (int j = 0; j < NUM_UC_DOUBLE; j++) {
+    uc_dbl_dep_max[1][j] = uc_dbl_dep_avg[1][j] =
+        (*((clocks)[0]->clocks[CLOCK_USEFUL].proc.getDoubleDeps()))[j];
+  }
+#endif
 
 #ifdef USE_MPI
   if (useMpi) {
@@ -242,6 +267,22 @@ void finishMeasurement() {
                 MPI_MAX, 0, MPI_COMM_WORLD);
     PMPI_Reduce(&uc_avg, &avgComputation, NUM_SHARED_METRICS, MPI_DOUBLE,
                 MPI_SUM, 0, MPI_COMM_WORLD);
+#if NUM_UC_INT64 > 0
+    PMPI_Reduce(&uc_int_dep_max, &maxIntDepVals,
+                NUM_SHARED_METRICS * NUM_UC_INT64, MPI_INT, MPI_MAX, 0,
+                MPI_COMM_WORLD);
+    PMPI_Reduce(&uc_int_dep_avg, &avgIntDepVals,
+                NUM_SHARED_METRICS * NUM_UC_INT64, MPI_INT, MPI_SUM, 0,
+                MPI_COMM_WORLD);
+#endif
+#if NUM_UC_DOUBLE > 0
+    PMPI_Reduce(&uc_dbl_dep_max, &maxDoubleDepVals,
+                NUM_SHARED_METRICS * NUM_UC_DOUBLE, MPI_DOUBLE, MPI_MAX, 0,
+                MPI_COMM_WORLD);
+    PMPI_Reduce(&uc_dbl_dep_avg, &avgDoubleDepVals,
+                NUM_SHARED_METRICS * NUM_UC_DOUBLE, MPI_DOUBLE, MPI_SUM, 0,
+                MPI_COMM_WORLD);
+#endif
     PMPI_Reduce(&num_threads, &total_threads, 1, MPI_INT, MPI_SUM, 0,
                 MPI_COMM_WORLD);
     PMPI_Reduce(&proc_counts, &total_counts,
@@ -252,57 +293,283 @@ void finishMeasurement() {
                 MPI_COMM_WORLD);
     PMPI_Comm_size(MPI_COMM_WORLD, &number_of_procs);
     avgComputation[1] = avgComputation[1] / number_of_procs;
-    avgComputation[3] = avgComputation[3] / number_of_procs;
-    avgComputation[4] = avgComputation[4] / number_of_procs;
     avgComputation[0] = avgComputation[0] / total_threads;
-    avgComputation[2] = avgComputation[2] / total_threads;
-    avgComputation[5] = avgComputation[5] / total_threads;
-    avgComputation[6] = avgComputation[6] / total_threads;
+#if NUM_UC_INT64 > 0
+    for (int j = 0; j < NUM_UC_INT64; j++) {
+      avgIntDepVals[1][j] = avgIntDepVals[1][j] / (double)number_of_procs;
+      avgIntDepVals[0][j] = avgIntDepVals[0][j] / (double)total_threads;
+    }
+#endif
+#if NUM_UC_DOUBLE > 0
+    for (int j = 0; j < NUM_UC_DOUBLE; j++) {
+      avgDoubleDepVals[1][j] = avgDoubleDepVals[1][j] / (double)number_of_procs;
+      avgDoubleDepVals[0][j] = avgDoubleDepVals[0][j] / (double)total_threads;
+    }
+#endif
   } else
 #endif
   {
     for (int i = 0; i < NUM_SHARED_METRICS; i++) {
       maxComputation[i] = uc_max[i];
       avgComputation[i] = uc_avg[i];
+#if NUM_UC_INT64 > 0
+      for (int j = 0; j < NUM_UC_INT64; j++) {
+        maxIntDepVals[i][j] = uc_int_dep_max[i][j];
+        avgIntDepVals[i][j] = uc_int_dep_avg[i][j];
+      }
+#endif
+#if NUM_UC_DOUBLE > 0
+      for (int j = 0; j < NUM_UC_DOUBLE; j++) {
+        maxDoubleDepVals[i][j] = uc_dbl_dep_max[i][j];
+        avgDoubleDepVals[i][j] = uc_dbl_dep_avg[i][j];
+      }
+#endif
     }
     avgComputation[0] /= num_threads;
-    avgComputation[2] /= num_threads;
-    avgComputation[5] /= num_threads;
-    avgComputation[6] /= num_threads;
+#if NUM_UC_INT64 > 0
+    for (int j = 0; j < NUM_UC_INT64; j++) {
+      avgIntDepVals[0][j] /= (double)num_threads;
+    }
+#endif
+#if NUM_UC_DOUBLE > 0
+    for (int j = 0; j < NUM_UC_DOUBLE; j++) {
+      avgDoubleDepVals[0][j] /= num_threads;
+    }
+#endif
   }
-  if (myProcId == 0) { // display results on master thread
-                       // calculate pop metrics
-    double totalRuntimeIdeal =
-        thread_local_clock->clocks[CLOCK_USEFUL].critical.getTime();
-    double totalOutsideMPIIdeal =
-        thread_local_clock->clocks[CLOCK_OMPI].critical.getTime();
-    double totalOutsideOMPIdeal =
-        thread_local_clock->clocks[CLOCK_OOMP].critical.getTime();
+}
 
-    avgComputation[5] = avgComputation[5] + totalRuntimeReal;
-    maxComputation[5] = maxComputation[5] + totalRuntimeReal;
+void print_POP_metrics(const double (&avgComputation)[NUM_SHARED_METRICS],
+                       const double (&maxComputation)[NUM_SHARED_METRICS],
+                       double totalRuntimeReal,
+                       double totalRuntimeRealCorrected,
+                       double totalRuntimeIdeal, FILE *of) {
+  double CommE = maxComputation[0] / totalRuntimeReal;
+  double TE = totalRuntimeIdeal / totalRuntimeReal;
+  double SerE = maxComputation[0] / totalRuntimeIdeal;
+  double LB = avgComputation[0] / maxComputation[0];
+  double PE = LB * CommE;
 
-    double CommE = maxComputation[0] / totalRuntimeReal;
-    double TE = totalRuntimeIdeal / totalRuntimeReal;
-    double SerE = maxComputation[0] / totalRuntimeIdeal;
-    double LB = avgComputation[0] / maxComputation[0];
-    double PE = LB * CommE;
+  // corrected values
+  double CommE_corr = maxComputation[0] / totalRuntimeRealCorrected;
+  double TE_corr = totalRuntimeIdeal / totalRuntimeRealCorrected;
+  double PE_corr = LB * CommE_corr;
 
-    double mpiLB = avgComputation[6] / maxComputation[0];
-    double ompLB = LB / mpiLB;
+  if (analysis_flags->verbose) {
+    fprintf(
+        of,
+        "\n[pop] "
+        "sere:%6.3lf:te:%6.3lf:comme:%6.3lf:lb:%6.3lf:pe:%6.3lf:crittime:%2."
+        "5lf:totaltime:%6.3lf:avgcomputation:%6.3lf:maxcomputation:%6.3lf\n",
+        SerE, TE, CommE, LB, PE, totalRuntimeIdeal, totalRuntimeReal,
+        avgComputation[0], maxComputation[0]);
+  }
 
-    double ompTE = totalOutsideOMPIdeal / totalRuntimeReal;
-    double mpiTE = TE / ompTE;
+  fprintf(of, "\n\n----------------POP metrics----------------\n");
+  fprintf(of, "Parallel Efficiency:                %6.3lf\n",
+          PE * analysis_flags->metric_factor);
+  fprintf(of, "  Load Balance:                     %6.3lf\n",
+          LB * analysis_flags->metric_factor);
+  fprintf(of, "  Communication Efficiency:         %6.3lf\n",
+          CommE * analysis_flags->metric_factor);
+  fprintf(of, "    Serialisation Efficiency:       %6.3lf\n",
+          SerE * analysis_flags->metric_factor);
+  fprintf(of, "    Transfer Efficiency:            %6.3lf\n",
+          TE * analysis_flags->metric_factor);
+  fprintf(of, "-------------------------------------------\n");
+}
 
-    double mpiSerE = maxComputation[3] / totalRuntimeIdeal;
-    double ompSerE = SerE / mpiSerE;
+void finishMeasurement() {
 
-    double mpiCommE = mpiSerE * mpiTE;
-    double ompCommE = ompSerE * ompTE;
+  if (analysis_flags->running) {
+    endProgrammTime = getTime();
+    // STATE_INIT to stop clock
+    thread_local_clock->setState(endProgrammTime, STATE_INIT, __func__);
+    analysis_flags->running = false;
+  }
 
-    double ompPE = ompLB * ompCommE;
-    double mpiPE = mpiLB * mpiCommE;
+  double totalRuntimeReal = endProgrammTime - startProgrammTime;
+  if (analysis_flags->verbose)
+    printf("runtime flag: %lf, %lf\n", totalRuntimeReal,
+           analysis_flags->runtime);
+  if (analysis_flags->runtime > 0)
+    totalRuntimeReal = analysis_flags->runtime;
 
+  // tool was never started
+  if (startProgrammTime == endProgrammTime) {
+    printf("Total Runtime: 0.0\n WARNING: No measurement data found, skipping "
+           "tool output. This can happen if the tool was never started.\n");
+    return;
+  }
+
+#if NUM_UC_INT64 > 0 || NUM_UC_DOUBLE > 0
+  // print info regarding dep metrics
+  auto depOrga = DepMetricOrganizer::getInstance();
+  Vector<IntDepMetricHandler *> *idhs = depOrga->getIntDepMetricHandlers();
+  Vector<DoubleDepMetricHandler *> *ddhs =
+      depOrga->getDoubleDepMetricHandlers();
+  if (analysis_flags->verbose) {
+    printf("Num int: %i, num double:%i\n", depOrga->getNumIntValues(),
+           depOrga->getNumDoubleValues());
+    for (int i = 0; i < idhs->Size(); i++) {
+      for (int j = 0; j < (*idhs)[i]->getNumValues(); j++) {
+        printf("'%s' ", (*idhs)[i]->getMetricName(j).c_str());
+      }
+      printf("\n");
+    }
+    for (int i = 0; i < ddhs->Size(); i++) {
+      for (int j = 0; j < (*ddhs)[i]->getNumValues(); j++) {
+        printf("'%s' ", (*ddhs)[i]->getMetricName(j).c_str());
+      }
+      printf("\n");
+    }
+    thread_local_clock->clocks[CLOCK_USEFUL].critical.printValues();
+    if (analysis_flags->tasking)
+      thread_local_clock->fiber->clocks[CLOCK_USEFUL].critical.printValues();
+  }
+#endif
+
+  // postprocess all vector and fiber clocks
+  Vector<THREAD_CLOCK *> clocks{};
+
+  if (thread_clocks) {
+    bool initialPushed = false;
+    for (int i = 0; i < thread_clocks->Size(); i++) {
+      bool isInitial =
+          ((*thread_clocks)[i]->thread_type == ompt_thread_initial);
+      // We are only interested in worker threads and the first initial thread.
+      // All other initial threads should be ignored
+      if (!initialPushed || !isInitial) {
+        // STATE_INIT to stop all clocks
+        if ((*thread_clocks)[i]->GetState() != STATE_INIT)
+          (*thread_clocks)[i]->setState(endProgrammTime, STATE_INIT, __func__);
+        clocks.PushBack((*thread_clocks)[i]);
+        if (isInitial)
+          initialPushed = true;
+      }
+    }
+    if (analysis_flags->verbose)
+      printf("Clocks size: %lu\n", thread_clocks->Size());
+  }
+  // If we have an MPI only run, thread_clocks is never set, so instead put
+  // thread_local_clock in a vector
+  else {
+    clocks.PushBack(thread_local_clock);
+    thread_clocks = new Vector<THREAD_CLOCK *>{};
+    thread_clocks->PushBack(thread_local_clock);
+  }
+
+  // Store all fiber clocks that exist at the end of the run  -> others are not
+  // of interest for us
+  Vector<THREAD_CLOCK *> fiber_clocks{};
+  if (analysis_flags->tasking) {
+    if (analysis_flags->verbose)
+      printf("FiberClocks size: %lu\n", thread_clocks->Size());
+    for (int i = 0; i < thread_clocks->Size(); i++) {
+      DCHECK((*thread_clocks)[i]->fiber);
+      fiber_clocks.PushBack((*thread_clocks)[i]->fiber);
+    }
+  }
+
+  fflush(NULL);
+
+  // Sum up OpenMP thread counts and maxima
+  double maxTimeTaskCreate, maxTimeTaskSchedule, maxTimeSync,
+      maxTimeDependences, maxTotal, avgTotal = 0.0;
+  if (thread_counts) {
+    if (analysis_flags->verbose)
+      printf(
+          "Taskvals on 0: %i, %f, %f, %f, %i, %i, %i, %i\n",
+          (*thread_counts)[0]->totalTasks, (*thread_counts)[0]->minTaskTime,
+          (*thread_counts)[0]->maxTaskTime, (*thread_counts)[0]->totalTaskTime,
+          (*thread_counts)[0]->implTaskBegin, (*thread_counts)[0]->implTaskEnd,
+          (*thread_counts)[0]->taskCreate, (*thread_counts)[0]->taskSchedule);
+    for (int i = 1; i < thread_counts->Size(); i++) {
+      if (analysis_flags->verbose)
+        printf(
+            "Taskvls on %i: %i, %f, %f, %f, %i, %i, %i, %i\n", i,
+            (*thread_counts)[i]->totalTasks, (*thread_counts)[i]->minTaskTime,
+            (*thread_counts)[i]->maxTaskTime,
+            (*thread_counts)[i]->totalTaskTime,
+            (*thread_counts)[i]->implTaskBegin,
+            (*thread_counts)[i]->implTaskEnd, (*thread_counts)[i]->taskCreate,
+            (*thread_counts)[i]->taskSchedule);
+      double totalOverhead = (*thread_counts)[i]->timeTaskCreate +
+                             (*thread_counts)[i]->timeTaskSchedule +
+                             (*thread_counts)[i]->timeSync +
+                             (*thread_counts)[i]->timeDependences;
+      if ((*thread_counts)[i]->timeTaskCreate > maxTimeTaskCreate)
+        maxTimeTaskCreate = (*thread_counts)[i]->timeTaskCreate;
+      if ((*thread_counts)[i]->timeTaskSchedule > maxTimeTaskSchedule)
+        maxTimeTaskSchedule = (*thread_counts)[i]->timeTaskSchedule;
+      if ((*thread_counts)[i]->timeSync > maxTimeSync)
+        maxTimeSync = (*thread_counts)[i]->timeSync;
+      if ((*thread_counts)[i]->timeDependences > maxTimeDependences)
+        maxTimeDependences = (*thread_counts)[i]->timeDependences;
+      if (totalOverhead > maxTotal)
+        maxTotal = totalOverhead;
+      avgTotal += totalOverhead;
+      (*thread_counts)[0]->add(*(*thread_counts)[i]);
+    }
+    avgTotal /= thread_counts->Size();
+  }
+
+  double runtimeCorrectedMaxOverhead1 = totalRuntimeReal - maxTimeTaskCreate -
+                                        maxTimeTaskSchedule - maxTimeSync -
+                                        maxTimeDependences;
+  double runtimeCorrectedMaxOverhead2 = totalRuntimeReal - maxTotal;
+  double runtimeCorrectedAvgOverhead = totalRuntimeReal - avgTotal;
+  double runtimeNoTool = runtimeCorrectedAvgOverhead;
+  if (strcmp("0.0", analysis_flags->no_tool_runtime) != 0) {
+    runtimeNoTool = strtod(analysis_flags->no_tool_runtime, nullptr);
+  }
+
+  // Calculate the average and maximum over all threads and processes
+  double avgComputation[NUM_SHARED_METRICS] = {0};
+  double maxComputation[NUM_SHARED_METRICS] = {0};
+  double fiberAvgComputation[NUM_SHARED_METRICS] = {0};
+  double fiberMaxComputation[NUM_SHARED_METRICS] = {0};
+
+  // dep metrics
+  double avgIntDepVals[NUM_SHARED_METRICS][NUM_UC_INT64];
+  int maxIntDepVals[NUM_SHARED_METRICS][NUM_UC_INT64];
+  double avgDoubleDepVals[NUM_SHARED_METRICS][NUM_UC_DOUBLE];
+  double maxDoubleDepVals[NUM_SHARED_METRICS][NUM_UC_DOUBLE];
+  double fiberAvgIntDepVals[NUM_SHARED_METRICS][NUM_UC_INT64];
+  int fiberMaxIntDepVals[NUM_SHARED_METRICS][NUM_UC_INT64];
+  double fiberAvgDoubleDepVals[NUM_SHARED_METRICS][NUM_UC_DOUBLE];
+  double fiberMaxDoubleDepVals[NUM_SHARED_METRICS][NUM_UC_DOUBLE];
+
+  int number_of_procs = 1;
+  int total_threads = 0;
+  MPI_COUNTS total_counts;
+
+  // Calculate fiber values first to have thread-values for MPI stats stored
+  if (analysis_flags->tasking)
+    calculate_average_and_max(fiber_clocks, totalRuntimeReal,
+                              fiberAvgComputation, fiberMaxComputation,
+                              fiberAvgIntDepVals, fiberMaxIntDepVals,
+                              fiberAvgDoubleDepVals, fiberMaxDoubleDepVals,
+                              number_of_procs, total_threads, total_counts);
+  calculate_average_and_max(clocks, totalRuntimeReal, avgComputation,
+                            maxComputation, avgIntDepVals, maxIntDepVals,
+                            avgDoubleDepVals, maxDoubleDepVals, number_of_procs,
+                            total_threads, total_counts);
+
+  // total_threads gets set in calculate_average_and_max
+  int num_threads = total_threads;
+
+  double totalRuntimeIdeal =
+      (*thread_clocks)[0]->clocks[CLOCK_USEFUL].critical.getTime();
+
+  double fiberTotalRuntimeIdeal = 0, fiberTotalOutsideOMPIdeal = 0;
+  if (analysis_flags->tasking) {
+    fiberTotalRuntimeIdeal =
+        (fiber_clocks)[0]->clocks[CLOCK_USEFUL].critical.getTime();
+  }
+
+  // Print critical path and POP metrics (on master thread)
+  if (myProcId == 0) {
     FILE *of = stdout;
     bool openedFile{false};
 
@@ -327,13 +594,6 @@ void finishMeasurement() {
     }
 
     if (analysis_flags->verbose) {
-      fprintf(
-          of,
-          "\n[pop] "
-          "sere:%6.3lf:te:%6.3lf:comme:%6.3lf:lb:%6.3lf:pe:%6.3lf:crittime:%2."
-          "5lf:totaltime:%6.3lf:avgcomputation:%6.3lf:maxcomputation:%6.3lf\n",
-          SerE, TE, CommE, LB, PE, totalRuntimeIdeal, totalRuntimeReal,
-          avgComputation[0], maxComputation[0]);
       fprintf(of, "\n\n--------MPI stats:--------\n");
       if (total_counts.send)
         fprintf(of, "MPI_*send: %lu\n", total_counts.send);
@@ -361,6 +621,29 @@ void finishMeasurement() {
           fprintf(of, "taskCreate: %i\n", tCounts->taskCreate);
         if (tCounts->taskSchedule)
           fprintf(of, "taskSchedule: %i\n", tCounts->taskSchedule);
+        // if(tCounts->minTaskTime)
+        fprintf(of, "minTaskTime: %.9f\n", tCounts->minTaskTime);
+        // if(tCounts->maxTaskTime)
+        fprintf(of, "maxTaskTime: %.9f\n", tCounts->maxTaskTime);
+        // if(tCounts->totalTaskTime)
+        fprintf(of, "totalTaskTime: %f\n", tCounts->totalTaskTime);
+        if (tCounts->totalTasks) {
+          fprintf(of, "totalTasks: %i\n", tCounts->totalTasks);
+          fprintf(of, "avgTaskTime: %.9f\n",
+                  tCounts->totalTaskTime / tCounts->totalTasks);
+        }
+        // if(tCounts->minImplTaskTime)
+        fprintf(of, "minImplTaskTime: %.9f\n", tCounts->minImplTaskTime);
+        // if(tCounts->maxImplTaskTime)
+        fprintf(of, "maxImplTaskTime: %.9f\n", tCounts->maxImplTaskTime);
+        // if(tCounts->totalImplTaskTime)
+        fprintf(of, "totalImplTaskTime: %f\n", tCounts->totalImplTaskTime);
+        if (tCounts->totalImplTasks) {
+          fprintf(of, "totalImplTasks: %i\n", tCounts->totalImplTasks);
+          fprintf(of, "avgImplTaskTime: %.9f\n",
+                  tCounts->totalImplTaskTime / tCounts->totalImplTasks);
+        }
+
         if (tCounts->implTaskBegin)
           fprintf(of, "implTaskBegin: %i\n", tCounts->implTaskBegin);
         if (tCounts->implTaskEnd)
@@ -371,76 +654,169 @@ void finishMeasurement() {
           fprintf(of, "syncRegionEnd: %i\n", tCounts->syncRegionEnd);
         if (tCounts->mutexAcquire)
           fprintf(of, "mutexAcquire: %i\n", tCounts->mutexAcquire);
+        fprintf(analysis_flags->output, "taskCreateTime: %f\n",
+                (*thread_counts)[0]->timeTaskCreate);
+        fprintf(analysis_flags->output, "taskScheduleTime: %f\n",
+                (*thread_counts)[0]->timeTaskSchedule);
+        fprintf(analysis_flags->output, "syncTime: %f\n",
+                (*thread_counts)[0]->timeSync);
+        fprintf(analysis_flags->output, "dependencesTime: %f\n",
+                (*thread_counts)[0]->timeDependences);
       }
     }
+
+    // assumption: 1 parallel region, no nesting
+
+    double taskCUEForNThreadsOld =
+        std::ceil(std::ceil(avgComputation[0] * total_threads /
+                            fiberTotalRuntimeIdeal) /
+                  total_threads) *
+        fiberTotalRuntimeIdeal;
+    double totTime = avgComputation[0] * total_threads;
+    double numDepChains = std::floor(totTime / fiberTotalRuntimeIdeal);
+    double restChains = totTime - (numDepChains * fiberTotalRuntimeIdeal);
+    double numTmin = std::ceil(numDepChains / total_threads);
+    double taskCUEForNThreads = numTmin * fiberTotalRuntimeIdeal;
+    if (total_threads * numTmin == numDepChains)
+      taskCUEForNThreads += restChains;
+    double taskCUEForNThreadsNew1 = avgComputation[0] + fiberTotalRuntimeIdeal;
+    double taskCUEForNThreadsNew2 = fiberTotalRuntimeIdeal + avgComputation[0] -
+                                    (fiberTotalRuntimeIdeal / total_threads);
+
+    if (analysis_flags->verbose)
+      fprintf(of,
+              "totTime: %6.3lf, #depChains: %6.3lf, restChainTime: %6.3lf, "
+              "numTmin: %6.3lf \n",
+              totTime, numDepChains, restChains, numTmin);
 
     fprintf(of, "\n\n--------CritPath Analysis Tool results:--------\n");
     fprintf(of, "=> Number of processes:          %i\n", number_of_procs);
     fprintf(of, "=> Number of threads:            %i\n", total_threads);
-    fprintf(of, "=> Average Computation (in s):   %6.3lf\n", avgComputation[0]);
-    if (analysis_flags->verbose) {
-      fprintf(of, "=> Maximum Computation (in s):   %6.3lf\n",
-              maxComputation[0]);
-      fprintf(of, "=> Max crit. computation (in s): %6.3lf\n",
-              totalRuntimeIdeal);
-      fprintf(of, "=> Average crit. proc-local computation (in s):    %6.3lf\n",
-              avgComputation[3]);
-      fprintf(of, "=> Maximum crit. proc-local computation (in s):    %6.3lf\n",
-              maxComputation[3]);
-      fprintf(of, "=> Average crit. proc-local Outside OpenMP (in s): %6.3lf\n",
-              avgComputation[4]);
-      fprintf(of, "=> Maximum crit. proc-local Outside OpenMP (in s): %6.3lf\n",
-              maxComputation[4]);
-      fprintf(of, "=> Average proc-local rumtime (in s):   %6.3lf\n",
-              avgComputation[5]);
-      fprintf(of, "=> Maximum proc-local runtime (in s):   %6.3lf\n",
-              maxComputation[5]);
-      fprintf(of, "=> Average PL-max Computation (in s):   %6.3lf\n",
-              avgComputation[6]);
-      fprintf(of, "=> Maximum PL-max Computation (in s):   %6.3lf\n",
-              maxComputation[6]);
-      fprintf(of, "=> Average Outside OpenMP (in s):   %6.3lf\n",
-              avgComputation[2]);
-      fprintf(of, "=> Maximum Outside OpenMP (in s):   %6.3lf\n",
-              maxComputation[2]);
-      fprintf(of, "=> Max crit. Outside OpenMP (in s): %6.3lf\n",
-              totalOutsideOMPIdeal);
-      fprintf(of, "=> Total runtime (in s):         %6.3lf\n",
-              totalRuntimeReal);
-    }
+    fprintf(of,
+            "=> AVGT: Threadlocal CUE (in s): \n    Thread-centric: %6.9lf\n",
+            avgComputation[0]);
+    fprintf(of,
+            "=> MAXT: Threadlocal CUE (in s): \n    Thread-centric: %6.9lf\n",
+            maxComputation[0]);
+    fprintf(of,
+            "=> Global CUE (in s): \n    Thread-centric: %6.9lf\n    "
+            "Task-centric: %6.9lf\n    Task-centric for %i threads: %6.9lf\n",
+            totalRuntimeIdeal, fiberTotalRuntimeIdeal, total_threads,
+            taskCUEForNThreads);
+    fprintf(of,
+            "=> AVGP: Processlocal CUE (in s): \n    Thread-centric: %6.3lf\n  "
+            "  Task-centric:%6.3lf\n",
+            avgComputation[1], fiberAvgComputation[1]);
+    fprintf(of,
+            "=> MAXP: Processlocal CUE (in s): \n    Thread-centric: %6.3lf\n  "
+            "  Task-centric:%6.3lf\n",
+            maxComputation[1], fiberMaxComputation[1]);
+    fprintf(of, "=> Total runtime (in s):         %6.9lf\n", totalRuntimeReal);
+    // fprintf(of, "=> Total runtime corrected (max1) (in s):         %6.9lf\n",
+    // runtimeCorrectedMaxOverhead1); fprintf(of, "=> Total runtime corrected
+    // (max2) (in s):         %6.9lf\n", runtimeCorrectedMaxOverhead2);
+    // fprintf(of, "=> Total runtime corrected (avg) (in s):         %6.9lf\n",
+    // runtimeCorrectedAvgOverhead); fprintf(of, "=> Total runtime no tool (sum)
+    // (in s):         %6.9lf\n", runtimeNoTool); fprintf(of, "Global
+    // task-centric CUE for N threads v1: %6.9lf vs:
+    // %6.9lf\n",taskCUEForNThreadsNew1,taskCUEForNThreadsNew2);
 
-    fprintf(of, "\n----------------POP metrics----------------\n");
-    fprintf(of, "Parallel Efficiency:                %6.3lf\n",
-            PE * analysis_flags->metric_factor);
-    fprintf(of, "  Load Balance:                     %6.3lf\n",
-            LB * analysis_flags->metric_factor);
-    fprintf(of, "  Communication Efficiency:         %6.3lf\n",
-            CommE * analysis_flags->metric_factor);
-    fprintf(of, "    Serialisation Efficiency:       %6.3lf\n",
-            SerE * analysis_flags->metric_factor);
-    fprintf(of, "    Transfer Efficiency:            %6.3lf\n",
-            TE * analysis_flags->metric_factor);
-    fprintf(of, "  MPI Parallel Efficiency:          %6.3lf\n",
-            mpiPE * analysis_flags->metric_factor);
-    fprintf(of, "    MPI Load Balance:               %6.3lf\n",
-            mpiLB * analysis_flags->metric_factor);
-    fprintf(of, "    MPI Communication Efficiency:   %6.3lf\n",
-            mpiCommE * analysis_flags->metric_factor);
-    fprintf(of, "      MPI Serialisation Efficiency: %6.3lf\n",
-            mpiSerE * analysis_flags->metric_factor);
-    fprintf(of, "      MPI Transfer Efficiency:      %6.3lf\n",
-            mpiTE * analysis_flags->metric_factor);
-    fprintf(of, "  OMP Parallel Efficiency:          %6.3lf\n",
-            ompPE * analysis_flags->metric_factor);
-    fprintf(of, "    OMP Load Balance:               %6.3lf\n",
-            ompLB * analysis_flags->metric_factor);
-    fprintf(of, "    OMP Communication Efficiency:   %6.3lf\n",
-            ompCommE * analysis_flags->metric_factor);
-    fprintf(of, "      OMP Serialisation Efficiency: %6.3lf\n",
-            ompSerE * analysis_flags->metric_factor);
-    fprintf(of, "      OMP Transfer Efficiency:      %6.3lf\n",
-            ompTE * analysis_flags->metric_factor);
-    fprintf(of, "-------------------------------------------\n");
+    if (thread_counts) {
+      auto *tCounts = (*thread_counts)[0];
+      fprintf(of, "\n#expl. tasks: %i, #impl. tasks: %i\n", tCounts->totalTasks,
+              tCounts->totalImplTasks);
+      fprintf(of, "Expl. task times: min: %.9f, max: %.9f, avg: %.9f\n",
+              tCounts->minTaskTime, tCounts->maxTaskTime,
+              tCounts->totalTaskTime / tCounts->totalTasks);
+      fprintf(of, "Impl. task times: min: %.9f, max: %.9f, avg: %.9f\n",
+              tCounts->minImplTaskTime, tCounts->maxImplTaskTime,
+              tCounts->totalImplTaskTime / tCounts->totalImplTasks);
+    }
+#if NUM_UC_INT64 > 0
+    // Int dep metrics
+    fprintf(of, "\n%i Integer Dependent Metrics: ", depOrga->getNumIntValues());
+    if (depOrga->getNumIntValues() > 0) {
+      for (int i = 0; i < idhs->Size(); i++) {
+        for (int j = 0; j < (*idhs)[i]->getNumValues(); j++) {
+          printf("'%s' ", (*idhs)[i]->getMetricName(j).c_str());
+        }
+      }
+      fprintf(of, "\n=> AVGT: Threadlocal CUE (in s): \n    Thread-centric: ");
+      for (int j = 0; j < depOrga->getNumIntValues(); j++) {
+        fprintf(of, " %f", avgIntDepVals[0][j]);
+      }
+      fprintf(of, "\n=> MAXT: Threadlocal CUE (in s): \n    Thread-centric: ");
+      for (int j = 0; j < depOrga->getNumIntValues(); j++) {
+        fprintf(of, " %i", maxIntDepVals[0][j]);
+      }
+      fprintf(of, "\n=> Global CUE (in s): \n    Thread-centric: ");
+      thread_local_clock->clocks[CLOCK_USEFUL].critical.printIntValues();
+      fprintf(of, "    Task-centric: ");
+      thread_local_clock->fiber->clocks[CLOCK_USEFUL].critical.printIntValues();
+      fprintf(of, "=> AVGP: Processlocal CUE (in s): \n    Thread-centric: ");
+      for (int j = 0; j < depOrga->getNumIntValues(); j++) {
+        fprintf(of, " %f", avgIntDepVals[1][j]);
+      }
+      fprintf(of, "\n    Task-centric: ");
+      for (int j = 0; j < depOrga->getNumIntValues(); j++) {
+        fprintf(of, " %f", fiberAvgIntDepVals[1][j]);
+      }
+      fprintf(of, "\n=> MAXP: Processlocal CUE (in s): \n    Thread-centric: ");
+      for (int j = 0; j < depOrga->getNumIntValues(); j++) {
+        fprintf(of, " %i", maxIntDepVals[1][j]);
+      }
+      fprintf(of, "\n    Task-centric: ");
+      for (int j = 0; j < depOrga->getNumIntValues(); j++) {
+        fprintf(of, " %i", fiberMaxIntDepVals[1][j]);
+      }
+    }
+#endif
+#if NUM_UC_DOUBLE > 0
+    // Double dep metrics
+    fprintf(of,
+            "\n\n%i Double Dependent Metrics: ", depOrga->getNumDoubleValues());
+    if (depOrga->getNumDoubleValues() > 0) {
+      for (int i = 0; i < ddhs->Size(); i++) {
+        for (int j = 0; j < (*ddhs)[i]->getNumValues(); j++) {
+          printf("'%s' ", (*ddhs)[i]->getMetricName(j).c_str());
+        }
+      }
+      fprintf(of, "\n=> AVGT: Threadlocal CUE (in s): \n    Thread-centric: ");
+      for (int j = 0; j < depOrga->getNumDoubleValues(); j++) {
+        fprintf(of, " %6.6f", avgDoubleDepVals[0][j]);
+      }
+      fprintf(of, "\n=> MAXT: Threadlocal CUE (in s): \n    Thread-centric: ");
+      for (int j = 0; j < depOrga->getNumDoubleValues(); j++) {
+        fprintf(of, " %6.6f", maxDoubleDepVals[0][j]);
+      }
+      fprintf(of, "\n=> Global CUE (in s): \n    Thread-centric: ");
+      thread_local_clock->clocks[CLOCK_USEFUL].critical.printDoubleValues();
+      fprintf(of, "    Task-centric: ");
+      thread_local_clock->fiber->clocks[CLOCK_USEFUL]
+          .critical.printDoubleValues();
+      fprintf(of, "=> AVGP: Processlocal CUE (in s): \n    Thread-centric: ");
+      for (int j = 0; j < depOrga->getNumDoubleValues(); j++) {
+        fprintf(of, " %6.6f", avgDoubleDepVals[1][j]);
+      }
+      fprintf(of, "\n    Task-centric: ");
+      for (int j = 0; j < depOrga->getNumDoubleValues(); j++) {
+        fprintf(of, " %6.6f", fiberAvgDoubleDepVals[1][j]);
+      }
+      fprintf(of, "\n=> MAXP: Processlocal CUE (in s): \n    Thread-centric: ");
+      for (int j = 0; j < depOrga->getNumDoubleValues(); j++) {
+        fprintf(of, " %6.6f", maxDoubleDepVals[1][j]);
+      }
+      fprintf(of, "\n    Task-centric: ");
+      for (int j = 0; j < depOrga->getNumDoubleValues(); j++) {
+        fprintf(of, " %6.6f", fiberMaxDoubleDepVals[1][j]);
+      }
+    }
+#endif
+
+    // Print POP metrics
+    print_POP_metrics(avgComputation, maxComputation, totalRuntimeReal,
+                      runtimeNoTool, totalRuntimeIdeal, of);
+
     if (openedFile) {
       fclose(of);
     }
@@ -452,19 +828,25 @@ inline int my_get_tid() {
 }
 
 void startTool(bool toolControl, ClockState cs) {
+  // if stopped=0, the omp_control_tool_start callback should have no influence
   if (analysis_flags->stopped && !toolControl)
     return;
   if (!analysis_flags->running) {
-    DCHECK_EQ(thread_local_clock->getState(), STATE_INIT);
+    DCHECK_EQ(thread_local_clock->GetState(), STATE_INIT);
     DCHECK_EQ(thread_local_clock->clocks[CLOCK_USEFUL].thread.getTime(), 0);
     DCHECK_EQ(thread_local_clock->clocks[CLOCK_USEFUL].proc.getTime(), 0);
     DCHECK_EQ(thread_local_clock->clocks[CLOCK_USEFUL].critical.getTime(), 0);
-    DCHECK_EQ(thread_local_clock->clocks[CLOCK_OMPI].proc.getTime(), 0);
-    DCHECK_EQ(thread_local_clock->clocks[CLOCK_OMPI].thread.getTime(), 0);
-    DCHECK_EQ(thread_local_clock->clocks[CLOCK_OMPI].critical.getTime(), 0);
-    DCHECK_EQ(thread_local_clock->clocks[CLOCK_OOMP].thread.getTime(), 0);
-    DCHECK_EQ(thread_local_clock->clocks[CLOCK_OOMP].critical.getTime(), 0);
-    DCHECK_EQ(thread_local_clock->clocks[CLOCK_OOMP].proc.getTime(), 0);
+    if (analysis_flags->tasking) {
+      // checks for fiber clocks
+      DCHECK_EQ(thread_local_clock->fiber->GetState(), STATE_INIT);
+      DCHECK_EQ(
+          thread_local_clock->fiber->clocks[CLOCK_USEFUL].thread.getTime(), 0);
+      DCHECK_EQ(thread_local_clock->fiber->clocks[CLOCK_USEFUL].proc.getTime(),
+                0);
+      DCHECK_EQ(
+          thread_local_clock->fiber->clocks[CLOCK_USEFUL].critical.getTime(),
+          0);
+    }
 
 #if 0 && defined(USE_MPI)
     if (useMpi) {
@@ -479,13 +861,16 @@ void startTool(bool toolControl, ClockState cs) {
     analysis_flags->running = true;
     startMeasurement(time);
     // For MPI initialization
-    if (cs == STATE_MPI && thread_local_clock->getState() == STATE_INIT)
+    if (cs == STATE_MPI && thread_local_clock->GetState() == STATE_INIT)
       thread_local_clock->enterState(time, STATE_USEFUL, __func__);
     thread_local_clock->enterState(time, cs, __func__);
   }
 }
 
 void stopTool() {
+  // if stopped=0, the omp_control_tool_end callback should have no influence
+  if (!analysis_flags->stopped)
+    return;
 #if 0 && defined(USE_MPI)
   if (useMpi) {
     if (analysis_flags->barrier) {
@@ -510,7 +895,8 @@ void stopTool() {
 __attribute__((destructor))
 #endif
 void exitHandler() {
-  if (analysis_flags->start_with_library_constructor) {
+  if (analysis_flags->start_with_library_constructor &&
+      analysis_flags->running) {
     if (analysis_flags->verbose)
       fprintf(analysis_flags->output, "Exiting library\n");
     finishMeasurement();
@@ -518,7 +904,7 @@ void exitHandler() {
 }
 
 __attribute__((constructor)) void onLibraryLoad() {
-  InitializeOtfcptFlags();
+  InitializeCptFlags();
   startTimeOffset = (long long)startProgrammTime;
   startProgrammTime -= startTimeOffset;
 
@@ -541,8 +927,11 @@ __attribute__((constructor)) void onLibraryLoad() {
       thread_clocks = new Vector<THREAD_CLOCK *>{};
 
     // Create a dummy thread clock
-    if (!thread_local_clock)
-      thread_local_clock = new THREAD_CLOCK(my_next_id(), 0);
+    if (!thread_local_clock) {
+      OmpFiberPoolInit();
+      thread_local_clock =
+          THREAD_CLOCK::New(my_next_id(), 0, ompt_thread_initial);
+    }
     thread_clocks->PushBack(thread_local_clock);
 
 #ifdef USE_ERRHANDLER

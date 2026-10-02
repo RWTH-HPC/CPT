@@ -8,13 +8,28 @@ config.testdir = "@CMAKE_CURRENT_BINARY_DIR@"
 config.testsrcdir = "@CMAKE_CURRENT_SOURCE_DIR@"
 config.project_src_dir = "@CMAKE_SOURCE_DIR@"
 
-config.otfcptlib = "@OTFCPT_LIB@"
-config.otfcptomplib = "@OTFCPT_OMP_LIB@"
+config.cptlib = "@CPT_LIB@"
+config.cptomplib = "@CPT_OMP_LIB@"
+
+config.test_c_compiler = "@TEST_C_COMPILER@"
+config.test_cxx_compiler = "@TEST_CXX_COMPILER@"
+config.test_fc_compiler = "@TEST_Fortran_COMPILER@"
+config.test_compiler_features = @TEST_COMPILER_FEATURES@
+config.test_mpi_features = "@TEST_MPI_FEATURES@"
+config.test_openmp_flags = "@TEST_OPENMP_FLAGS@"
+config.test_mpi_c_flags = "@TEST_MPI_C_FLAGS@"
+config.test_mpi_cxx_flags = "@TEST_MPI_CXX_FLAGS@"
+config.test_mpi_fortran_flags = "@TEST_MPI_Fortran_FLAGS@"
+
+config.test_ub = "@CPT_TEST_UB@"
+config.test_lb = "@CPT_TEST_LB@"
+config.test_work = "@CPT_TEST_WORK@"
+
 
 # Booleans must not have quotes! ("False" is true!)
 config.openmp_found = @OpenMP_FOUND@
 config.forward_full_env = @LIT_FORWARD_FULL_ENV@
-config.have_fortran = @OTFCPT_ENABLE_FORTRAN_TESTS@
+config.have_fortran = @CPT_ENABLE_FORTRAN_TESTS@
 
 # Let the main config do the real work.
 lit_config.load_config(config, "@CMAKE_CURRENT_SOURCE_DIR@/lit.cfg")

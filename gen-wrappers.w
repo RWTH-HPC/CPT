@@ -1,6 +1,7 @@
 #include <mpi.h>
 #include <stdio.h>
 
+#include "fiberpool.h"
 #include "tracking.h"
 #include "criticalPath.h"
 #include "mpi-critical.h"

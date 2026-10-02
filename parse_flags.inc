@@ -29,6 +29,9 @@ PARSE_FLAG(bool, barrier, false,
 
 PARSE_FLAG(bool, colorize, true, "Colorize output.")
 
+PARSE_FLAG(bool, tasking, true,
+           "Enable tasking analysis (disable currently not supported).")
+
 PARSE_FLAG(bool, help, false, "Print the flag descriptions.")
 
 PARSE_FLAG(bool, stacktrace, false,
@@ -52,3 +55,19 @@ PARSE_FLAG(const char *, log_path, "stdout",
 PARSE_FLAG(const char *, data_path, "stdout",
            "Write metric data to \"<data_path>-<#procs>x<#threads>.txt\". "
            "The special values are \"stdout\" and \"stderr\".")
+
+PARSE_FLAG(const char *, no_tool_runtime, "0.0", "Runtime without tool")
+
+PARSE_FLAG(bool, collect_task_type_share, false, "Collect task type share.")
+
+PARSE_FLAG(
+    const char *, task_prio_shares, "",
+    "List of (non-negative integers for) task priorities whose share should be "
+    "collected. Semicolon separated. Empty string disables collection.")
+
+PARSE_FLAG(const char *, task_name_shares, "",
+           "List of task names whose share should be collected. Semicolon "
+           "separated. Empty string disables collection.")
+
+PARSE_FLAG(bool, collect_task_counts_on_cp, false,
+           "Whether to collect the number of tasks on the critical path.")

@@ -8,7 +8,7 @@
 #include <string.h>
 #include <unistd.h>
 
-namespace __otfcpt {
+namespace cpt {
 
 typedef unsigned long uptr;
 typedef signed long sptr;
@@ -109,5 +109,5 @@ typedef signed long long s64;
   extern "C" SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE ReturnType \
   Name(__VA_ARGS__)
 
-} // namespace __otfcpt
+} // namespace cpt
 #endif

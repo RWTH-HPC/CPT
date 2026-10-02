@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.13.4...3.27.4)
 
-project(OTFCPT C CXX)
+project(CPT C CXX)
 
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   SET(CMAKE_BUILD_TYPE "Release" CACHE STRING "Installation directory" FORCE)
@@ -14,62 +14,17 @@ Learn more about these options in LLVM's documentation at https://llvm.org/docs/
 ")
 endif()
 
-find_package(MPI REQUIRED)
-
 SET(CMAKE_MODULE_PATH
     "${CMAKE_SOURCE_DIR}/cmakemodules"
     ${CMAKE_MODULE_PATH}
     )
 
 include(TestMpiFeatures)
-set_mpi_test_features()
+set_compiler_test_features()
 
 include(CheckLanguage)
 
-set(MPI_CXX_SKIP_MPICXX TRUE)
-add_definitions(-DOMPI_SKIP_MPICXX)
-
-set(OTFCPT_HAVE_Fortran False)
-set(OTFCPT_USE_Fortran_WRAPPERS False)
-
-check_language(Fortran)
-if(CMAKE_Fortran_COMPILER)
-  set(OTFCPT_HAVE_Fortran True)
-  if("${TEST_MPI_FEATURES}" MATCHES "ompi")
-    set(OTFCPT_USE_Fortran_WRAPPERS True)
-    # We don't test for OpenMPI 4 with <4.1.6, because MPI_F_STATUS_IGNORE 
-    # is broken with some of these versions
-    if("${TEST_MPI_FEATURES}" MATCHES "ompi-4.0" OR 
-       "${TEST_MPI_FEATURES}" MATCHES "ompi-4.1.[0-5]")
-      set(OTFCPT_HAVE_Fortran False)
-      set(OTFCPT_USE_Fortran_WRAPPERS False)
-    endif()
-  endif()
-  if("${TEST_MPI_FEATURES}" MATCHES "\\[\\]")
-    message(STATUS "Detection of MPI implementation failed, disabling Fortran support")
-    set(OTFCPT_HAVE_Fortran False)
-    set(OTFCPT_USE_Fortran_WRAPPERS False)
-  endif()
-endif()
-
-option(OTFCPT_ENABLE_FORTRAN_WRAPPERS "Build OTF-CPT with pmpi Fortran wrappers" ${OTFCPT_USE_Fortran_WRAPPERS})
-
-if(OTFCPT_ENABLE_FORTRAN_WRAPPERS)
-  if(NOT OTFCPT_HAVE_Fortran)
-      message(ERROR "No Fortran support available, but requested with OTFCPT_ENABLE_FORTRAN_WRAPPERS")
-  endif()
-  enable_language(Fortran)
-  find_package(MPI REQUIRED)
-elseif(OTFCPT_HAVE_Fortran AND NOT OTFCPT_USE_Fortran_WRAPPERS)
-  message(STATUS "Assuming native Fortran support for MPICH-3 and IntelMPI")
-else()
-  message(STATUS "No Fortran support")
-endif()
-
 find_package(OpenMP REQUIRED)
-
-set(WRAP ${OTFCPT_SOURCE_DIR}/external/wrap/wrap.py)
-include(${OTFCPT_SOURCE_DIR}/external/wrap/WrapConfig.cmake)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 
@@ -77,93 +32,48 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-SET(CMAKE_MODULE_PATH
-    "${OTFCPT_SOURCE_DIR}/external/CMake-MPIhelper/cmake"
-    ${CMAKE_MODULE_PATH}
-    )
+# By default, 1 integer dependent metric and 15 double dependent metrics can be measured alongside the CP. If -DNUM_DEP_INT_METRICS=X or -DNUM_DEP_DBL_METRICS=Y is passed to cmake call, user can change these values to X and Y, respectively.
+set(NUM_DEP_INT_METRICS 1 CACHE STRING "Sets how many integer dependent metrics can be measured alongside the CP.")
+set(NUM_DEP_DBL_METRICS 15 CACHE STRING "Sets how many double dependent metrics can be measured alongside the CP.")
 
-include(CheckMPIFunctionExists)
-include(CheckMPISymbolExists)
-include(CheckMPISymbolIsRvalue)
-include(CheckMPITypeExists)
+###Configure cptConfig.h
+configure_file(cptConfig.h.in "${CMAKE_CURRENT_BINARY_DIR}/cptConfig.h")
 
-macro (check_mpi_function_exists_pp function)
-    STRING(TOUPPER "HAVE_${function}" havevariable)
-    check_mpi_symbol_is_rvalue(${function} ${havevariable})
-endmacro (check_mpi_function_exists_pp)
-macro (check_mpi_type_exists_pp type)
-    STRING(TOUPPER "HAVE_${type}" havevariable)
-    check_mpi_type_exists(${type} ${havevariable})
-endmacro (check_mpi_type_exists_pp)
+include_directories(${CPT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 
-check_mpi_type_exists_pp(MPI_Session)
-check_mpi_type_exists_pp(MPI_Count)
-check_mpi_function_exists_pp(MPI_Barrier_init)
-check_mpi_function_exists_pp(PMPI_Isendrecv_replace)
-
-if(HAVE_MPI_SESSION)
-    add_definitions(-DHAVE_SESSION)
-endif()
-if(HAVE_MPI_COUNT)
-    add_definitions(-DHAVE_COUNT)
-endif()
-if(HAVE_MPI_BARRIER_INIT)
-    add_definitions(-DHAVE_PCOLL)
-endif()
-if(HAVE_PMPI_ISENDRECV_REPLACE)
-    add_definitions(-DHAVE_ISRR)
-endif()
-
-include_directories(${OTFCPT_SOURCE_DIR} ${MPI_C_INCLUDE_PATH} ${MPI_CXX_INCLUDE_PATH})
-
-set(OTFCPT_SOURCES
-    completion-wrappers.cpp
-    critical-core.cpp
-    man-wrappers.cpp
-    mpi-critical.cpp
-    ompt-critical.cpp
-    tracking.cpp
-    gen-nb-wrappers.cpp
-    gen-wrappers.cpp
-    parse_flags.cpp
-    debug.cpp
-)
-
-set(OTFCPT_OMP_SOURCES
+set(CPT_OMP_SOURCES
     critical-core.cpp
     ompt-critical.cpp
+    fiberpool.cpp
     parse_flags.cpp
     debug.cpp
+    dependentMetrics.cpp
 )
 
-if(OTFCPT_ENABLE_FORTRAN_WRAPPERS)
-    add_definitions(-DFORTRAN_SUPPORT)
-    list(APPEND OTFCPT_SOURCES fort-wrappers.c)
-endif()
-
-option(OTFCPT_DEBUG_CLOCKS "Detailed clock printing at every sync point" OFF)
-if (OTFCPT_DEBUG_CLOCKS)
+option(CPT_DEBUG_CLOCKS "Detailed clock printing at every sync point" OFF)
+if (CPT_DEBUG_CLOCKS)
   add_compile_definitions(-DDEBUG_CLOCKS)
 endif()
 
 list(APPEND GnuCompatible "Clang" "IntelLLVM" "GNU")
 list(APPEND ClangCompatible "Clang" "IntelLLVM")
-option(OTFCPT_USE_BACKWARD "Use Backward-CPP for stacktraces" OFF)
+option(CPT_USE_BACKWARD "Use Backward-CPP for stacktraces" OFF)
 if ("${CMAKE_CXX_COMPILER_ID}" IN_LIST GnuCompatible)
-  set(NOSTDLIB_FLAG "-nostdlib++")
-  if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13)
-    set(NOSTDLIB_FLAG -nodefaultlibs -lc)
-  endif ()
+  set(NOSTDLIB_FLAG "")
+  # set(NOSTDLIB_FLAG "-nostdlib++")
+  #if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13)
+    #set(NOSTDLIB_FLAG -nodefaultlibs -lc)
+  #endif ()
   set(STDCPLUS_COMPILE_FLAGS -fno-rtti -fno-exceptions -ffunction-sections -fdata-sections)
   set(STDCPLUS_LINK_FLAGS -fno-rtti -fno-exceptions ${NOSTDLIB_FLAG} -Wl,--gc-sections)
 
   if ("${CMAKE_CXX_COMPILER_ID}" IN_LIST ClangCompatible)
-    option(OTFCPT_USE_LLVM_LIBCPP "Use LLVM libc++, which might reduce portability." OFF)
-    if (OTFCPT_USE_LLVM_LIBCPP)
+    option(CPT_USE_LLVM_LIBCPP "Use LLVM libc++, which might reduce portability." OFF)
+    if (CPT_USE_LLVM_LIBCPP)
       message(STATUS "Building with LLVM libc++ was requested, which might limit portability and compatibility with application/library code compiled with gcc.")
       set(STDCPLUS_COMPILE_FLAGS -stdlib=libc++)
       set(STDCPLUS_LINK_FLAGS -stdlib=libc++)
-      if(OTFCPT_USE_BACKWARD)
+      if(CPT_USE_BACKWARD)
         set(LINK_EXTERNAL_LIBRARIES Backward::Interface)
         add_compile_definitions(-DUSE_BACKWARD)
       endif()
@@ -177,17 +87,17 @@ if ("${CMAKE_CXX_COMPILER_ID}" IN_LIST GnuCompatible)
 endif ()
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Intel")
   set(STDCPLUS_COMPILE_FLAGS -fno-exceptions)
-  set(STDCPLUS_LINK_FLAGS -cxxlib-nostd)
+#  set(STDCPLUS_LINK_FLAGS -cxxlib-nostd)
 endif ()
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   include_directories(external/ompt)
 endif()
 
-option(OTFCPT_USE_GNU_LIBCPP "Use GNU libstdc++, which might reduce portability." OFF)
-if (OTFCPT_USE_GNU_LIBCPP)
-  if (OTFCPT_USE_LLVM_LIBCPP)
-    message(WARNING "OTFCPT_USE_GNU_LIBCPP and OTFCPT_USE_LLVM_LIBCPP are on at the same time, will build with GNU libstdc++")
+option(CPT_USE_GNU_LIBCPP "Use GNU libstdc++, which might reduce portability." OFF)
+if (CPT_USE_GNU_LIBCPP)
+  if (CPT_USE_LLVM_LIBCPP)
+    message(WARNING "CPT_USE_GNU_LIBCPP and CPT_USE_LLVM_LIBCPP are on at the same time, will build with GNU libstdc++")
   endif()
   if ("${CMAKE_CXX_COMPILER_ID}" IN_LIST ClangCompatible)
     set(STDCPLUS_COMPILE_FLAGS -stdlib=libstdc++)
@@ -197,45 +107,50 @@ if (OTFCPT_USE_GNU_LIBCPP)
     set(STDCPLUS_LINK_FLAGS "")
   endif()
   add_compile_definitions(-DUSE_STL)
-  if (OTFCPT_USE_BACKWARD)
+  if (CPT_USE_BACKWARD)
     add_compile_definitions(-DUSE_BACKWARD)
     set(LINK_EXTERNAL_LIBRARIES Backward::Interface)
   endif()
 else()
-  if(OTFCPT_USE_BACKWARD AND NOT OTFCPT_USE_LLVM_LIBCPP)
-    message(WARNING "OTFCPT_USE_GNU_LIBCPP or OTFCPT_USE_LLVM_LIBCPP should be enabled in order to use BackwardCPP, ignoring.")
+  if(CPT_USE_BACKWARD AND NOT CPT_USE_LLVM_LIBCPP)
+    message(WARNING "CPT_USE_GNU_LIBCPP or CPT_USE_LLVM_LIBCPP should be enabled in order to use BackwardCPP, ignoring.")
   endif()
 endif()
 
 set(WRAP_FLAGS -s -n)
 
-if(OTFCPT_ENABLE_FORTRAN_WRAPPERS)
+if(CPT_ENABLE_FORTRAN_WRAPPERS)
   set(WRAP_FLAGS -n -f)
 endif()
 
-if (OTFCPT_USE_BACKWARD)
+if (CPT_USE_BACKWARD)
   add_subdirectory(${CMAKE_SOURCE_DIR}/external/backward-cpp)
 endif()
 
-add_wrapped_file(gen-nb-wrappers.cpp gen-nb-wrappers.w)
-add_wrapped_file(gen-wrappers.cpp gen-wrappers.w)
+add_library(CPT_omp SHARED ${CPT_OMP_SOURCES})
+add_library(CPT SHARED ${CPT_OMP_SOURCES})
+target_link_libraries(CPT PUBLIC CPT_omp)
+target_link_libraries(CPT_omp PUBLIC ${LINK_EXTERNAL_LIBRARIES})
+target_link_options(CPT_omp PUBLIC ${STDCPLUS_LINK_FLAGS} "LINKER:-as-needed")
+target_compile_options(CPT_omp PUBLIC ${STDCPLUS_COMPILE_FLAGS})
 
-add_library(OTFCPT SHARED ${OTFCPT_SOURCES})
-target_link_libraries(OTFCPT PUBLIC MPI::MPI_CXX ${LINK_EXTERNAL_LIBRARIES})
-target_compile_definitions(OTFCPT PUBLIC -DUSE_MPI=1)
-target_link_options(OTFCPT PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:${STDCPLUS_LINK_FLAGS}>" "LINKER:-as-needed")
-target_compile_options(OTFCPT PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:${STDCPLUS_COMPILE_FLAGS}>")
+add_library(CPT_nohb SHARED ${CPT_OMP_SOURCES})
+target_link_libraries(CPT_nohb PUBLIC ${LINK_EXTERNAL_LIBRARIES})
+target_compile_definitions(CPT_nohb PUBLIC -DNOHB=1)
+target_link_options(CPT_nohb PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:${STDCPLUS_LINK_FLAGS}>" "LINKER:-as-needed")
+target_compile_options(CPT_nohb PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:${STDCPLUS_COMPILE_FLAGS}>")
 
-add_library(OTFCPT_omp SHARED ${OTFCPT_OMP_SOURCES})
-target_link_libraries(OTFCPT_omp PUBLIC ${LINK_EXTERNAL_LIBRARIES})
-target_link_options(OTFCPT_omp PUBLIC ${STDCPLUS_LINK_FLAGS} "LINKER:-as-needed")
-target_compile_options(OTFCPT_omp PUBLIC ${STDCPLUS_COMPILE_FLAGS})
+add_library(CPT_nohb_notime SHARED ${CPT_OMP_SOURCES})
+target_link_libraries(CPT_nohb_notime PUBLIC ${LINK_EXTERNAL_LIBRARIES})
+target_compile_definitions(CPT_nohb_notime PUBLIC -DNOHB=1 -DNOTIME=1)
+target_link_options(CPT_nohb_notime PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:${STDCPLUS_LINK_FLAGS}>" "LINKER:-as-needed")
+target_compile_options(CPT_nohb_notime PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:${STDCPLUS_COMPILE_FLAGS}>")
 
-add_library(OTFCPT_static STATIC ${OTFCPT_SOURCES})
-target_link_libraries(OTFCPT_static PUBLIC MPI::MPI_CXX ${LINK_EXTERNAL_LIBRARIES})
-target_compile_definitions(OTFCPT_static PUBLIC -DUSE_MPI=1)
-target_link_options(OTFCPT_static PUBLIC ${STDCPLUS_LINK_FLAGS})
-target_compile_options(OTFCPT_static PUBLIC ${STDCPLUS_COMPILE_FLAGS})
+add_library(CPT_empty SHARED ${CPT_OMP_SOURCES})
+target_link_libraries(CPT_empty PUBLIC ${LINK_EXTERNAL_LIBRARIES})
+target_compile_definitions(CPT_empty PUBLIC -DEMPTYCB=1)
+target_link_options(CPT_empty PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:${STDCPLUS_LINK_FLAGS}>" "LINKER:-as-needed")
+target_compile_options(CPT_empty PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:${STDCPLUS_COMPILE_FLAGS}>")
 
 add_library(KMPC SHARED kmpc-intercept.c)
 
@@ -247,9 +162,8 @@ add_subdirectory(tests)
 
 
 install(TARGETS 
-        OTFCPT 
-        OTFCPT_omp
-        OTFCPT_static
+        CPT_omp
+	CPT_nohb
+	CPT_nohb_notime
+	CPT_empty
         )
-
-install (PROGRAMS script/CPT-plot.py DESTINATION bin)

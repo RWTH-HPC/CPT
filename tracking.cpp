@@ -147,7 +147,7 @@ template <> MPI_Session SessionData::nullHandle{MPI_SESSION_NULL};
 SessionFactory sf;
 #endif
 
-int ipcData::num_uc_double{NUM_UC_DOUBLE};
+int ipcData::num_uc_double{NUM_UC_DOUBLE + 1};
 int ipcData::num_uc_int64{NUM_UC_INT64};
 MPI_Datatype ipcData::ipcMpiType{MPI_DATATYPE_NULL};
 MPI_Op ipcData::ipcMpiOp{MPI_OP_NULL};

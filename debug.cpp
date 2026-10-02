@@ -1,9 +1,11 @@
 #include "debug.h"
+
+#include "containers.h"
 #include "parse_flags.h"
 #include "typedefs.h"
 #include <execinfo.h>
 
-using namespace __otfcpt;
+using namespace cpt;
 
 std::atomic<uint32_t> current_verbosity{0};
 
@@ -40,24 +42,22 @@ void print_stack(CptStreamBuffer &stream) {
 void print_stack() {
   char buffer[DBG_BUFFER_SIZE];
   CptStreamBuffer stream(buffer, DBG_BUFFER_SIZE);
-  FILE *out =
-      (get_otfcpt_flags()->output ? get_otfcpt_flags()->output : stderr);
+  FILE *out = (get_cpt_flags()->output ? get_cpt_flags()->output : stderr);
   print_stack(stream);
   stream.fflush(out);
 }
 
 void NORETURN Die() {
-  if (get_otfcpt_flags()->abort_on_error)
+  if (get_cpt_flags()->abort_on_error)
     abort();
-  exit(get_otfcpt_flags()->exitcode);
+  exit(get_cpt_flags()->exitcode);
 }
 
 void CheckFailed(const char *file, int line, const char *cond, u64 v1, u64 v2,
                  std::initializer_list<const char *> msgs) {
   char buffer[DBG_BUFFER_SIZE];
   CptStreamBuffer stream(buffer, DBG_BUFFER_SIZE);
-  FILE *out =
-      (get_otfcpt_flags()->output ? get_otfcpt_flags()->output : stderr);
+  FILE *out = (get_cpt_flags()->output ? get_cpt_flags()->output : stderr);
 
   stream << "\nCheck failed in " << file << ":" << line << " "
          << (unsigned long long)v1 << " " << cond << " "
@@ -67,15 +67,22 @@ void CheckFailed(const char *file, int line, const char *cond, u64 v1, u64 v2,
     stream << m;
   }
 
-  print_stack(stream);
+  // print_stack(stream);
   stream.fflush(out);
 
-  if (!get_otfcpt_flags()->continue_on_error) {
+  if (!get_cpt_flags()->continue_on_error) {
     Die();
   }
 }
 
 // std::atomic needs this function in debug config
+#ifndef _GLIBCXX_NORETURN
+#define _GLIBCXX_NORETURN
+#endif
+#ifndef _GLIBCXX_NOEXCEPT
+#define _GLIBCXX_NOEXCEPT
+#endif
+
 #ifndef USE_STL
 namespace std {
 extern "C++" _GLIBCXX_NORETURN __attribute__((__cold__)) void

@@ -24,21 +24,10 @@ stages:
   script:
     - git clang-format --verbose --diff ${CI_MERGE_REQUEST_DIFF_BASE_SHA}
 
-.setup-python-env:
-  script:
-    - python3 -m venv env
-    - source env/bin/activate
-    - pip install --upgrade pip
-    - pip install --retries 5 --timeout 30 -r ${CI_PROJECT_DIR}/script/requirements.txt
-
 .artifacts-template:
   artifacts:
     reports:
       junit: build/tests/check.xunit.xml
-    paths:
-      - build/tests/plot/Output
-    paths:
-      - build/tests/plot/Output
 
 .debian-based:
   extends: .artifacts-template
@@ -90,15 +79,15 @@ stages:
                            -DCMAKE_CXX_COMPILER=mpicxx.${MPI} \
                            -DCMAKE_Fortran_COMPILER=mpif90.${MPI} \
                            -DMPIEXEC_EXECUTABLE=${MPIEXEC} \
-                           -DOTFCPT_TEST_LB=.8 \
-                           -DOTFCPT_TEST_UB=1.05 \
-                           -DOTFCPT_TEST_WORK=300000
+                           -DCPT_TEST_LB=.8 \
+                           -DCPT_TEST_UB=1.05 \
+                           -DCPT_TEST_WORK=300000
     - cmake --build build --verbose
     - cmake --install build
-    - !reference [.setup-python-env, script]
     - EXIT_CODE=0
     - cmake --build build --verbose -- check || EXIT_CODE=$?
-    - ldd build/libOTFCPT.so | grep -q "libstdc++" && echo -e "\e[1;31mFound libstdc++ dependency, failure\e[0m" && exit 1
+# This branch is not setup for stdc++-less build
+#    - ldd build/libCPT.so | grep -q "libstdc++" && echo -e "\e[1;31mFound libstdc++ dependency, failure\e[0m" && exit 1
     - exit $EXIT_CODE
 
 ubuntu:
@@ -131,6 +120,12 @@ debian:
       - module purge
       - module load "${TOOLCHAIN}/${VERSION}"
       - module load Python
+      - |
+        if [[ "${TOOLCHAIN}" == "iimpi" && "${VERSION}" == "2023b" ]]; then
+          module load CMake/3.27.6
+        else
+          module load CMake
+        fi
       - >-
         if [[ "${COMPILER}" == *"Clang"* ]]; then
           module load Clang
@@ -186,11 +181,10 @@ cluster:
     extends: .cluster-template
     script:
       - !reference [.cluster-build, script]
-      - !reference [.setup-python-env, script]
       - EXIT_CODE=0
       - cmake --build build --verbose -- check || EXIT_CODE=$?
-      - ldd build/libOTFCPT.so
-      - ldd build/libOTFCPT.so | grep -q 'libstdc++' && echo "Error libstdc++ linked" && exit 1 || echo "Info No libstdc++ dependency found"
+      - ldd build/libCPT.so
+#      - ldd build/libCPT.so | grep -q 'libstdc++' && echo "Error libstdc++ linked" && exit 1 || echo "Info No libstdc++ dependency found"
       - exit $EXIT_CODE
     artifacts:
       reports:

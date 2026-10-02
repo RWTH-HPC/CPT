@@ -82,7 +82,7 @@ enum toolDataEnum {
 };
 
 #include "handle-data.h"
-using namespace __otfcpt;
+using namespace cpt;
 
 // Abstract interface of the HandleFactor
 template <typename M, typename T, auto E> class AbstractHandleFactory {

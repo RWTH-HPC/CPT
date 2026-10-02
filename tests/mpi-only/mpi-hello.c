@@ -1,8 +1,9 @@
 // clang-format off
+// RUN: %compile_mpi_c
 // ALLOW_RETRIES: 1
-// RUN: %mpirunnp 2 %load_otfcpt OTFCPT_OPTIONS="barrier=1 metric_factor=1000" %t | %FileCheck \
+// RUN: %mpirunnp 2 %load_cpt CPT_OPTIONS="barrier=1 metric_factor=1000" %t | %FileCheck \
 // RUN: --check-prefixes=CHECK %metricfile
-// RUN: %mpirunnp 2 %load_otfcpt OTFCPT_OPTIONS="barrier=1 start_with_library_constructor=1 metric_factor=1000" %t | %FileCheck \
+// RUN: %mpirunnp 2 %load_cpt CPT_OPTIONS="barrier=1 start_with_library_constructor=1 metric_factor=1000" %t | %FileCheck \
 // RUN: --check-prefixes=CHECK %metricfile
 // clang-format on
 

@@ -35,8 +35,11 @@ void init_processes(mpiTimer &mt);
 struct mpiTimer {
   const char *loc;
   mpiTimer(bool openmp_thread = false, const char *loc = NULL) : loc(loc) {
+    // CPT might not be initialized for the current thread yet
     if (thread_local_clock == nullptr) {
-      thread_local_clock = new THREAD_CLOCK(my_next_id(), 0, openmp_thread);
+      OmpFiberPoolInit();
+      thread_local_clock = THREAD_CLOCK::New(
+          my_next_id(), 0, ompt_thread_unknown, openmp_thread);
       thread_local_clock->enterState(STATE_USEFUL, __func__);
     }
     thread_local_clock->enterState(STATE_MPI, loc);
