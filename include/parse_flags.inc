@@ -15,6 +15,30 @@ PARSE_FLAG(bool, verbose, false, "Provide verbose output.")
 PARSE_FLAG(bool, enabled, true,
            "Inject OpenMP synchronization semantics to TSan.")
 
+#ifdef USE_CUDA
+PARSE_FLAG(bool, cuda_analysis, false, "Analyze CUDA activity")
+
+PARSE_FLAG(bool, gpu_critical_path, false,
+           "Analyze critical path through device activity")
+
+PARSE_FLAG(int, device_limit, 16,
+           "Maximum number of devices that can be tracked")
+
+PARSE_FLAG(int, event_limit, 12,
+           "Only in case of error: maximum number of events before "
+           "aggregating, power of 2, so 2^(event_limit)")
+
+PARSE_FLAG(int, cupti_buffer_limit, 20,
+           "Only in case of error: CUPTI buffer limit, power of 2, so "
+           "2^(cupti_buffer_limit)")
+#endif
+
+#ifdef USE_MPI
+PARSE_FLAG(bool, mpi_analysis, true, "MPI Analysis")
+#endif
+
+PARSE_FLAG(bool, omp_analysis, true, "OpenMP Analysis")
+
 PARSE_FLAG(bool, report_data_leak, false, "Report tool internal data leaks.")
 
 PARSE_FLAG(bool, stopped, false, "Delay start of measurement.")

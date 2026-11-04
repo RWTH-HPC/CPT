@@ -52,6 +52,9 @@ CC=mpicc.openmpi CXX=mpicxx.openmpi cmake ../
 make -j8
 ```
 
+### Notes on CUDA
+CMake should automatically detect the presence of CUDA. It will then make available two additional analysis types: `cuda_analysis` and `gpu_critical_path`.
+
 ## Using the tool with an application
 Depending on the system and how libomp.so is built, LD_PRELOAD and OMP_TOOL_LIBRARIES might both be necessary. Assuming a cmake build as described above, an application with CPT is executed like:
 ```
@@ -70,8 +73,19 @@ omp_control_tool(omp_control_tool_start, 0, NULL); // start
 // region of interest
 omp_control_tool(omp_control_tool_end, 0, NULL); // stop
 ```
-
+or for CUDA applications:
+```
+#include <nvtx3/nvToolsExt.h>
+// ...
+nvtxRangeId_t range_id = nvtxRangeStartA("CPT");
+// region of interest
+nvtxRangeEnd(range_id);
+```
 In both cases the runtime option `stopped=1` should be used, see below.
+
+Otherwise, `start_with_library_constructor` can be used to run a test over the whole application.
+
+In the CUDA case, the message should begin with "CPT", and the range ID should be stored and given as a parameter to `nvptxRangeEnd`. NVTX ranges will also be disabled if another tool is using them, in that case use `start_with_library_constructor=1`.
 
 ### Runtime options
 The behavior of CPT can be changed with different runtime options. All
@@ -141,6 +155,34 @@ encountered.</td>
 <td class="org-left">Use CPT during execution.</td>
 </tr>
 </tbody>
+<tbody>
+<tr>
+<td class="org-left">omp_analysis</td>
+<td class="org-right">1</td>
+<td class="org-left">Use OMP analysis during execution.</td>
+</tr>
+</tbody>
+<tbody>
+<tr>
+<td class="org-left">mpi_analysis</td>
+<td class="org-right">1</td>
+<td class="org-left">Use MPI analysis during execution.</td>
+</tr>
+</tbody>
+<tbody>
+<tr>
+<td class="org-left">cuda_analysis</td>
+<td class="org-right">0</td>
+<td class="org-left">Use CUDA analysis (POP metrics only)</td>
+</tr>
+</tbody>
+<tbody>
+<tr>
+<td class="org-left">gpu_critical_path</td>
+<td class="org-right">0</td>
+<td class="org-left">Use GPU critical path analysis during execution.</td>
+</tr>
+</tbody>
 </table>
 
 ## GNU compilers and OpenMP
@@ -170,8 +212,6 @@ $ ls data_*
 data_graph.pdf  data_graph.png  data_metrics.pdf  data_metrics.png
 ```
 
-
-
 ## Files
 ### MPI Function Wrappers
 - completion-wrappers.cpp  - Request completion calls
@@ -184,6 +224,7 @@ data_graph.pdf  data_graph.png  data_metrics.pdf  data_metrics.png
 - critical-core.cpp  - CPT core functions
 - ompt-critical.cpp  - OMPT specific code for CPT
 - mpi-critical.cpp   - MPI specific code for CPT
+- cuda-tracking.cpp  - CUDA specific code for CPT
 
 ### wrap.py Templates
 - gen-nb-wrappers.w
@@ -195,5 +236,6 @@ external/wrap/wrap.py -s -n gen-wrappers.w -o gen-wrappers.cpp
 
 ## Publications
 
+- **Joachim Jenke, Ben Thärigen, Kaloyan Ignatov, Tobias Dollenbacher and Simon Schwitanski**: *Tracking the Critical Path of Execution for GPU Offloading Applications*. Euro-Par 2025
 - **Joachim Protze, Fabian Orland, Kingshuk Haldar, Thore Koritzius, Christian Terboven**: *On-the-Fly Calculation of Model Factors for Multi-paradigm Applications*. Euro-Par 2022
 - **Joachim Jenke, Michael Knobloch, Marc-André Hermanns, Simon Schwitanski**: *A Shim Layer for Transparently Adding Meta Data to MPI Handles*. EuroMPI 2023

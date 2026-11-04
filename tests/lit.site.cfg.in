@@ -21,6 +21,12 @@ config.test_mpi_c_flags = "@TEST_MPI_C_FLAGS@"
 config.test_mpi_cxx_flags = "@TEST_MPI_CXX_FLAGS@"
 config.test_mpi_fortran_flags = "@TEST_MPI_Fortran_FLAGS@"
 
+config.have_cuda = @ENABLE_CUDA_SUPPORT@
+config.test_cuda_compiler = "@TEST_CUDA_COMPILER@"
+config.test_cuda_include_dir = "@CUDAToolkit_INCLUDE_DIRS@"
+config.test_cuda_lib_dir = "@CUDAToolkit_LIBRARY_DIR@"
+config.test_cupti_lib = "@CUDA_cupti_LIBRARY@"
+
 config.test_ub = "@CPT_TEST_UB@"
 config.test_lb = "@CPT_TEST_LB@"
 config.test_work = "@CPT_TEST_WORK@"

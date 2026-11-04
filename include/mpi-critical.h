@@ -1,14 +1,14 @@
-#include <mpi.h>
-
 #include "ipc-data.h"
+#include <mpi.h>
 #ifndef MPI_CRITICAL_H
 #define MPI_CRITICAL_H 1
 
-#define NUM_UC_TIMERS 4
 #define REF_RANK 0
 
 #include "criticalPath.h"
 #include "tracking.h"
+
+#define NUM_UC_TIMERS NUM_UC_DOUBLE
 
 void MpiHappensAfter(ipcData *uc, int remote = 0);
 void MpiHappensAfter(ipcData &uc, int remote = 0);

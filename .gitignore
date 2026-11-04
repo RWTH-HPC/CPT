@@ -1,0 +1,9 @@
+build*/
+BUILD
+test
+testdir
+temp
+.gdb_history
+.cache
+.vscode
+external/llvm-lit/lit/*

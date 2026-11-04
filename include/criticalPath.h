@@ -6,6 +6,8 @@
 #endif
 
 #include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <inttypes.h>
 #include <mutex>
 #include <stdio.h>
@@ -47,6 +49,14 @@ using namespace __cpt;
 #endif
 #endif
 
+enum AnalysisTypes {
+  AT_NONE = 0,
+  AT_OMP = 1,
+  AT_MPI = 2,
+  AT_CUDA = 4,
+  AT_CUDA_CP = 8
+};
+
 enum ClockState {
   STATE_UNINIT = -1,
   STATE_INIT = 0,
@@ -63,7 +73,8 @@ enum ClockType {
   CLOCK_OMPI = 1,
   CLOCK_OOMP = 2,
   CLOCK_OGPU = 3,
-  CLOCK_LAST = 4
+  CLOCK_WGPU = 4,
+  CLOCK_LAST = 5
 };
 
 extern const char *debug_clock_state_string[];
@@ -71,24 +82,58 @@ extern const char *debug_clock_state_string[];
 #define STRING_CLOCK_STATE(a) debug_clock_state_string[((int)(a) + 1)]
 
 static const bool State[STATE_LAST][CLOCK_LAST] = {
-    {false, false, false, false}, // INIT
-    {false, true, true, true},    // NONE
-    {true, true, true, true},     // USEFUL
-    {false, false, true, true},   // MPI
-    {false, true, false, true},   // OMP
-    {false, true, true, false}    // GPU
-}; // USEFUL, OMPI, OOMP, OGPU
+    {false, false, false, false, false}, // INIT
+    {false, true, true, true, false},    // NONE
+    {true, true, true, true, false},     // USEFUL
+    {false, false, true, true, false},   // MPI
+    {false, true, false, true, false},   // OMP
+    {true, true, true, false, true}      // GPU
+}; // USEFUL, OMPI, OOMP, OGPU, WGPU
 
 extern int myProcId;
-extern bool useMpi;
+// extern bool useMpi;
 extern double localTimeOffset;
 extern long long startTimeOffset;
 extern double startProgrammTime;
 extern double crit_path_useful_time;
+extern u8 activeAnalyses;
+extern u8 requestedAnalyses;
 
 double getTime();
 uint64_t my_next_id();
 int my_get_tid();
+
+void ParseRequestedAnalyses();
+
+inline void ActivateAnalysis(u8 at) {
+  activeAnalyses |= at & requestedAnalyses;
+}
+
+inline void DeactivateAnalysis(u8 at) { activeAnalyses &= ~at; }
+
+inline bool CheckAnalysis(u8 at) {
+  if (at == AT_NONE) {
+    return activeAnalyses == AT_NONE;
+  }
+  return (activeAnalyses & at) != 0;
+}
+
+inline bool CheckRequestedAnalysis(u8 at) {
+  if (at == AT_NONE) {
+    return requestedAnalyses == AT_NONE;
+  }
+  return (requestedAnalyses & at) != 0;
+}
+
+struct KernelData {
+  // finish simulates starting, execution, and completion of the kernel
+  // finish also frees the KernelData
+  virtual void finish(double dur, uint32_t streamId, uint32_t deviceID = 0) = 0;
+  virtual ~KernelData() {}
+  void operator delete(void *p) { free(p); }
+};
+// extern thread_local KernelData *thread_local_taskdata;
+inline thread_local KernelData *thread_local_taskdata = nullptr;
 
 template <typename T>
 static void update_maximum(std::atomic<T> &maximum_value,
@@ -205,8 +250,6 @@ using CP_CLOCKS = cpClocks<BaseMetric>;
 
 typedef SYNC_CLOCK ompt_tsan_clockid;
 
-int my_get_tid();
-
 extern thread_local THREAD_CLOCK *thread_local_clock;
 
 #ifdef DEBUG_CLOCKS
@@ -230,6 +273,9 @@ template <class T> struct cpClocks {
   T thread{0};
   T proc{0};
   T critical{0};
+  T thread_device{0};
+  T proc_device{0};
+  T critical_device{0};
 
   cpClocks() : thread(0), proc(0), critical(0) {}
 
@@ -264,6 +310,14 @@ template <class T> struct cpClocks {
     cc.proc.maxUpdate(proc);
     cc.critical.maxUpdate(critical);
   }
+  void GpuHBefore(cpClocks &cc) {
+    proc_device.maxUpdate(cc.proc_device);
+    critical_device.maxUpdate(cc.critical_device);
+  }
+  void GpuHAfter(cpClocks &cc) {
+    cc.proc_device.maxUpdate(proc_device);
+    cc.critical_device.maxUpdate(critical_device);
+  }
 };
 
 template <class T> struct syncClock {
@@ -296,6 +350,10 @@ public:
   void OmpHAfter(const char *loc, const char *fileline,
                  THREAD_CLOCK *tc = thread_local_clock);
   void OmpCReset();
+  void GpuHBefore(const char *loc, const char *fileline,
+                  THREAD_CLOCK *tc = thread_local_clock);
+  void GpuHAfter(const char *loc, const char *fileline,
+                 THREAD_CLOCK *tc = thread_local_clock);
   void Print(const char *prefix1, const char *prefix2 = "",
              const char *prefix3 = "") {
     fprintf(
@@ -304,7 +362,8 @@ public:
         "%s (%p) %s%s: "
         "uct=%lf, ucp=%lf, ucc=%lf, "
         "omt=%lf, omp=%lf, omc=%lf, "
-        "oot=%lf, oop=%lf, ooc=%lf\n",
+        "oot=%lf, oop=%lf, ooc=%lf, "
+        "ogt=%lf, ogp=%lf, ogc=%lf\n",
         my_get_tid(), prefix1, this, prefix2, prefix3,
         clocks[CLOCK_USEFUL].thread.getTime(),
         clocks[CLOCK_USEFUL].proc.getTime(),
@@ -312,7 +371,9 @@ public:
         clocks[CLOCK_OMPI].thread.getTime(), clocks[CLOCK_OMPI].proc.getTime(),
         clocks[CLOCK_OMPI].critical.getTime(),
         clocks[CLOCK_OOMP].thread.getTime(), clocks[CLOCK_OOMP].proc.getTime(),
-        clocks[CLOCK_OOMP].critical.getTime());
+        clocks[CLOCK_OOMP].critical.getTime(),
+        clocks[CLOCK_OGPU].thread.getTime(), clocks[CLOCK_OGPU].proc.getTime(),
+        clocks[CLOCK_OGPU].critical.getTime());
   }
   void *operator new(size_t size) { return malloc(size); }
   void operator delete(void *p) { free(p); }
@@ -352,6 +413,7 @@ struct omptCounts {
   int syncRegionBegin{0};
   int syncRegionEnd{0};
   int mutexAcquire{0};
+  int kernelLaunch{0};
   void add(const omptCounts &o) {
     taskCreate += o.taskCreate;
     taskSchedule += o.taskSchedule;
@@ -360,6 +422,7 @@ struct omptCounts {
     syncRegionBegin += o.syncRegionBegin;
     syncRegionEnd += o.syncRegionEnd;
     mutexAcquire += o.mutexAcquire;
+    kernelLaunch += o.kernelLaunch;
   }
 
   void *operator new(size_t size) { return malloc(size); }
@@ -379,7 +442,9 @@ template <class T> struct threadClock : public syncClock<T>, MPI_COUNTS {
         openmp_thread(_openmp_thread) {
     clock_state_stack.push_back({STATE_INIT, __PRETTY_FUNCTION__});
   }
-  threadClock() {}
+  threadClock() {
+    clock_state_stack.push_back({STATE_INIT, __PRETTY_FUNCTION__});
+  }
   threadClock(const threadClock &other) : threadClock(my_next_id(), 0) {
     if (other.GetState() != STATE_INIT)
       clock_state_stack.push_back(other.GetStateEntry());
@@ -482,28 +547,58 @@ template <class T> struct threadClock : public syncClock<T>, MPI_COUNTS {
   const Pair<ClockState, const char *> &GetStateEntry() const {
     return clock_state_stack.getBack();
   }
+  void Add(double time, ClockState cs = STATE_GPU, const char *loc = NULL) {
+    assert(loc);
+#if DEBUG_CLOCKS
+    this->Print("Adding at ", loc);
+#endif
+    if (!analysis_flags->running)
+      return;
+#if DEBUG_HB
+    printf("%s (%p) @%s: %lf %i\n", __PRETTY_FUNCTION__, this, loc, time, cs);
+#endif
+    assert(cs == STATE_GPU);
+    clocks[CLOCK_USEFUL].AddAll(time);
+    clocks[CLOCK_OMPI].AddAll(time);
+    clocks[CLOCK_OOMP].AddAll(time);
+#if DEBUG_CLOCKS
+    this->Print("Added at ", loc);
+#endif
+  }
 
   void *operator new(size_t size) { return malloc(size); }
 
   void operator delete(void *p) { free(p); }
 };
 
-extern Vector<THREAD_CLOCK *> *thread_clocks;
-extern Vector<omptCounts *> *thread_counts;
+extern Vector<THREAD_CLOCK *> *omp_thread_clocks;
+extern Vector<omptCounts *> *omp_thread_counts;
 extern ompt_finalize_tool_t critical_ompt_finalize_tool;
 
+THREAD_CLOCK *getOrCreateStreamClock(uint32_t streamID, uint32_t deviceID);
+void GpuSyncDevice(uint32_t deviceID);
 void resetMpiClock(THREAD_CLOCK *thread_clock);
 
 void startTool(bool toolControl = true, ClockState cs = STATE_USEFUL);
-void stopTool();
+void stopTool(bool cantDump = false);
 
 #define OmpHappensBefore(cv, ...)                                              \
   (cv)->OmpHBefore(__PRETTY_FUNCTION__, GET_FILELINE, ##__VA_ARGS__)
 #define OmpHappensAfter(cv, ...)                                               \
   (cv)->OmpHAfter(__PRETTY_FUNCTION__, GET_FILELINE, ##__VA_ARGS__)
 #define OmpClockReset(cv) (cv)->OmpCReset()
+#define GpuHappensBefore(cv, ...)                                              \
+  (cv)->GpuHBefore(__func__, GET_FILELINE, ##__VA_ARGS__)
+#define GpuHappensAfter(cv, ...)                                               \
+  (cv)->GpuHAfter(__func__, GET_FILELINE, ##__VA_ARGS__)
+#define OmpEnterRuntime() thread_local_clock->enterState(STATE_OMP, __func__)
+#define OmpExitRuntime() thread_local_clock->exitState(__func__)
+#define GpuEnterRuntime() thread_local_clock->enterState(STATE_GPU, __func__)
+#define GpuExitRuntime() thread_local_clock->exitState(__func__)
+#define GpuExecKernel(s, t) (s)->Add(t, STATE_GPU, __func__)
+#define GpuExecKernelOnStreamID(s, d, t) getOrCreateStreamClock(s, d)->Add(t)
 
-void startMeasurement(double time = getTime());
+void startMeasurement(double time = 0);
 void stopMeasurement(double time = getTime());
 
 void finishMeasurement();
@@ -587,7 +682,97 @@ template <class T> void syncClock<T>::OmpCReset() {
   sync_state = STATE_INIT;
 }
 
+template <class T>
+void syncClock<T>::GpuHBefore(const char *loc, const char *fileline,
+                              THREAD_CLOCK *tc_arg) {
+  if (!analysis_flags->running)
+    return;
+#ifdef DEBUG_HB
+  printf("%s @%s: %p <- %p\n", __PRETTY_FUNCTION__, loc, this, tc_arg);
+#endif
+  UniqLock<T> lock(scMutex);
+  this->CheckArc(loc, fileline, tc_arg);
+  clocks[CLOCK_USEFUL].GpuHBefore(tc_arg->clocks[CLOCK_USEFUL]);
+  clocks[CLOCK_OOMP].GpuHBefore(tc_arg->clocks[CLOCK_OOMP]);
+  clocks[CLOCK_OMPI].GpuHBefore(tc_arg->clocks[CLOCK_OMPI]);
+  clocks[CLOCK_OGPU].GpuHBefore(tc_arg->clocks[CLOCK_OGPU]);
+}
+
+template <class T>
+void syncClock<T>::GpuHAfter(const char *loc, const char *fileline,
+                             THREAD_CLOCK *tc_arg) {
+  if (!analysis_flags->running)
+    return;
+  UniqLock<T> lock(scMutex);
+  this->CheckArc(loc, fileline, tc_arg);
+  clocks[CLOCK_USEFUL].GpuHAfter(tc_arg->clocks[CLOCK_USEFUL]);
+  clocks[CLOCK_OOMP].GpuHAfter(tc_arg->clocks[CLOCK_OOMP]);
+  clocks[CLOCK_OMPI].GpuHAfter(tc_arg->clocks[CLOCK_OMPI]);
+  clocks[CLOCK_OGPU].GpuHAfter(tc_arg->clocks[CLOCK_OGPU]);
+#ifdef DEBUG_HB
+  printf("%s @%s: %p -> %p this->uccd=%lf, tc_arg->uccd=%lf\n",
+         __PRETTY_FUNCTION__, loc, this, tc_arg,
+         clocks[CLOCK_USEFUL].critical_device.getTime(),
+         tc_arg->clocks[CLOCK_USEFUL].critical_device.getTime());
+#endif
+}
+
 extern "C" void enterOpenMP(const char *loc);
 extern "C" void exitOpenMP(const char *loc);
+
+#ifdef USE_CUDA
+struct CudaData;
+using CudaDataPool = DataPool<CudaData>;
+
+template <> __thread CudaDataPool *CudaDataPool::ThreadDataPool;
+
+/// Data structure to store additional information for tasks.
+struct CudaData final : DataPoolEntry<CudaData>, KernelData {
+  /// This address is used for relationships of this kernel.
+  ompt_tsan_clockid Kernel{0};
+
+  ompt_tsan_clockid *GetKernelPtr() { return &Kernel; }
+
+  CudaData *Init() {
+    GpuHappensBefore(GetKernelPtr());
+    return this;
+  }
+
+  void finish(double dur, uint32_t streamId, uint32_t deviceId = 0) {
+    // finish simulates starting, execution, and completion of the kernel
+    // finish also frees the KernelData
+#if DEBUG_HB
+    printf("%s (%lf, %i, %i)\n", __PRETTY_FUNCTION__, dur, streamId, deviceId);
+#endif
+    auto streamClock = getOrCreateStreamClock(streamId, deviceId);
+
+    GpuHappensAfter(GetKernelPtr(), streamClock);
+    // TODO: Fix clock context
+    GpuExecKernel(streamClock, dur);
+    Delete();
+  }
+
+  void Reset() {
+    // Kernel.Reset();
+  }
+
+  static CudaData *New();
+
+  CudaData(DataPool<CudaData> *dp) : DataPoolEntry<CudaData>(dp) {}
+
+  void operator delete(void *p) { free(p); }
+};
+#endif
+
+static KernelData *getKernelData() {
+  if (KernelData *ret = thread_local_taskdata) {
+    thread_local_taskdata = nullptr;
+    return ret;
+  }
+#ifdef USE_CUDA
+  return CudaData::New();
+#endif
+  return nullptr;
+}
 
 #endif

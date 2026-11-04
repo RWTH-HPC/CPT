@@ -4,7 +4,7 @@
 // RUN: %mpirunnp 2 env %load_cpt CPT_OPTIONS="barrier=1 metric_factor=1000" %t | %FileCheck \
 // RUN: --check-prefixes=CHECK %metricfile
 // RUN: %mpirunnp 2 env %load_cpt CPT_OPTIONS="barrier=1 start_with_library_constructor=1 metric_factor=1000" %t | %FileCheck \
-// RUN: --check-prefixes=CHECK %metricfile
+// RUN: --check-prefixes=CHECK2 %metricfile
 // clang-format on
 
 #include <mpi.h>

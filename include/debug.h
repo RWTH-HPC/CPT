@@ -10,6 +10,8 @@
 
 using namespace __cpt;
 
+#ifdef CPTBUILD // if built with CPT
+
 extern std::atomic<uint32_t> current_verbosity;
 
 inline void SetVerbosity(int verbosity) {
@@ -18,6 +20,8 @@ inline void SetVerbosity(int verbosity) {
 inline int Verbosity() {
   return current_verbosity.load(std::memory_order_relaxed);
 }
+
+#endif
 
 void PrintStack();
 
@@ -76,6 +80,14 @@ void CheckFailed(const char *file, int line, const char *cond, u64 v1, u64 v2,
 #define CHECK_AND(a, b) CHECK_IMPL((a), &&, (b))
 #define CHECK_VA(a, ...) CHECK_IMPL_VA((a), !=, 0, __VA_ARGS__)
 #define CHECK_EQ_VA(a, b, ...) CHECK_IMPL_VA((a), ==, (b), __VA_ARGS__)
+#define CHECK_NOT_VA(a, ...) CHECK_IMPL_VA((a), ==, 0, __VA_ARGS__)
+#define CHECK_NE_VA(a, b, ...) CHECK_IMPL_VA((a), !=, (b), __VA_ARGS__)
+#define CHECK_LT_VA(a, b, ...) CHECK_IMPL_VA((a), <, (b), __VA_ARGS__)
+#define CHECK_LE_VA(a, b, ...) CHECK_IMPL_VA((a), <=, (b), __VA_ARGS__)
+#define CHECK_GT_VA(a, b, ...) CHECK_IMPL_VA((a), >, (b), __VA_ARGS__)
+#define CHECK_GE_VA(a, b, ...) CHECK_IMPL_VA((a), >=, (b), __VA_ARGS__)
+#define CHECK_OR_VA(a, b, ...) CHECK_IMPL_VA((a), ||, (b), __VA_ARGS__)
+#define CHECK_AND_VA(a, b, ...) CHECK_IMPL_VA((a), &&, (b), __VA_ARGS__)
 
 #ifndef NDEBUG
 #define DCHECK(a) CHECK(a)
@@ -90,6 +102,14 @@ void CheckFailed(const char *file, int line, const char *cond, u64 v1, u64 v2,
 #define DCHECK_AND(a, b) CHECK_AND(a, b)
 #define DCHECK_VA(a, ...) CHECK_VA(a, __VA_ARGS__)
 #define DCHECK_EQ_VA(a, b, ...) CHECK_EQ_VA(a, b, __VA_ARGS__)
+#define DCHECK_NOT_VA(a, ...) CHECK_NOT_VA(a, __VA_ARGS__)
+#define DCHECK_NE_VA(a, b, ...) CHECK_NE_VA(a, b, __VA_ARGS__)
+#define DCHECK_LT_VA(a, b, ...) CHECK_LT_VA(a, b, __VA_ARGS__)
+#define DCHECK_LE_VA(a, b, ...) CHECK_LE_VA(a, b, __VA_ARGS__)
+#define DCHECK_GT_VA(a, b, ...) CHECK_GT_VA(a, b, __VA_ARGS__)
+#define DCHECK_GE_VA(a, b, ...) CHECK_GE_VA(a, b, __VA_ARGS__)
+#define DCHECK_OR_VA(a, b, ...) CHECK_OR_VA(a, b, __VA_ARGS__)
+#define DCHECK_AND_VA(a, b, ...) CHECK_AND_VA(a, b, __VA_ARGS__)
 #else
 #define DCHECK(a)
 #define DCHECK_NOT(a)
@@ -103,6 +123,16 @@ void CheckFailed(const char *file, int line, const char *cond, u64 v1, u64 v2,
 #define DCHECK_AND(a, b)
 #define DCHECK_VA(a, ...)
 #define DCHECK_EQ_VA(a, b, ...)
+#define DCHECK_NOT_VA(a, ...)
+#define DCHECK_NE_VA(a, b, ...)
+#define DCHECK_LT_VA(a, b, ...)
+#define DCHECK_LE_VA(a, b, ...)
+#define DCHECK_GT_VA(a, b, ...)
+#define DCHECK_GE_VA(a, b, ...)
+#define DCHECK_OR_VA(a, b, ...)
+#define DCHECK_AND_VA(a, b, ...)
 #endif // NDEBUG
 
+#ifndef CPTBUILD
+#endif
 #endif

@@ -173,6 +173,10 @@ void init_timer_offsets() {
   }
   PMPI_Bcast(timeOffsets.begin(), size, MPI_DOUBLE, 0, cw_dup);
   localTimeOffset = localTime = timeOffsets[rank];
+  // if the tool is already running, propagate offsets
+  if (analysis_flags->running) {
+    startProgrammTime -= localTimeOffset;
+  }
   if (rank == 0 && analysis_flags->verbose) {
     printf("Timer Offsets:");
     for (auto &v : timeOffsets) {
@@ -192,6 +196,9 @@ void init_processes(mpiTimer &mt) {
     printf("Process %i at %s\n", myProcId, processor_name);
   }
   init_timer_offsets();
+  // if (!omp_thread_clocks)
+  //   omp_thread_clocks = new Vector<THREAD_CLOCK *>{};
+
   if (!analysis_flags->running) {
     startTool(false, STATE_MPI);
   }
@@ -231,7 +238,7 @@ int MPI_Finalize(void) {
  ************************/
 
 int MPI_Pcontrol(const int level, ...) {
-  if (useMpi == false) {
+  if (!CheckAnalysis(AT_MPI)) {
     printf("MPI_Pcontrol called before MPI_Init or something is wrong with "
            "Fortran setup\n");
     MPI_Abort(MPI_COMM_SELF, -1);

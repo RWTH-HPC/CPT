@@ -66,6 +66,13 @@ else()
   message(STATUS "No Fortran support")
 endif()
 
+find_package(CUDAToolkit)
+option(ENABLE_CUDA_SUPPORT "Enable CUDA support" ${CUDAToolkit_FOUND})
+
+if (ENABLE_CUDA_SUPPORT)
+  enable_language(CUDA)
+endif()
+
 find_package(OpenMP REQUIRED)
 
 set(WRAP ${CPT_SOURCE_DIR}/external/wrap/wrap.py)
@@ -113,6 +120,8 @@ endif()
 if(HAVE_PMPI_ISENDRECV_REPLACE)
     add_definitions(-DHAVE_ISRR)
 endif()
+
+add_compile_definitions(CPTBUILD)
 
 list(APPEND GnuCompatible "Clang" "IntelLLVM" "GNU")
 list(APPEND ClangCompatible "Clang" "IntelLLVM")
