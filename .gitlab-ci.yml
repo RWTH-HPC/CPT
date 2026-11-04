@@ -37,8 +37,6 @@ stages:
       junit: build/tests/check.xunit.xml
     paths:
       - build/tests/plot/Output
-    paths:
-      - build/tests/plot/Output
 
 .debian-based:
   extends: .artifacts-template
