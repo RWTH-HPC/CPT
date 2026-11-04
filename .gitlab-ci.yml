@@ -19,6 +19,7 @@ stages:
   image: ubuntu:24.04
   before_script:
     - export DEBIAN_FRONTEND=noninteractive
+    - df -h
     - apt-get update
     - apt-get install -y --no-install-recommends git clang-format
   script:
@@ -54,6 +55,7 @@ stages:
     FF_SCRIPT_SECTIONS: "1"
   before_script:
     - export DEBIAN_FRONTEND=noninteractive
+    - df -h
     - apt-get update
     - >-
       apt-get install -y --no-install-recommends
@@ -119,11 +121,11 @@ debian:
     tags: 
       - "downscope-testing"
     variables:
-      SLURM_PARAM_CPUS_PER_TASK: "-c 4"
+      SLURM_PARAM_CPUS_PER_TASK: "-c 4" 
       SLURM_PARAM_ACCOUNT: "-A rwth1282"
-      SLURM_PARAM_PARTITION: "-p c23ms"
+      # SLURM_PARAM_PARTITION: "-p c23ms"
       SLURM_DPARAM_ACCOUNT: "-A rwth1282"
-      SLURM_DPARAM_PARTITION: "-p c23ms"
+      # SLURM_DPARAM_PARTITION: "-p c23ms"
       CI_MODE: "Slurm"
 
     before_script:
@@ -145,6 +147,14 @@ debian:
           if [[ "${TOOLCHAIN}" == *"iimpi"* ]]; then
             export FC=ifort F90=ifort
           fi
+        fi
+      # The cluster has Clang-CUDA modules that do not support the loaded GCC
+      # But this only really matters if we are testing GPU
+      - >-
+        if [[ -e /usr/bin/nvidia-smi ]]; then
+          module load CUDA 
+        else 
+          export CUDAFLAGS="-allow-unsupported-compiler"
         fi
       - >-
         if [[ "${USE_ONEAPI}" == "1" ]]; then
@@ -180,6 +190,11 @@ debian:
 .cluster-build:
     stage: build
     extends: .cluster-template
+
+    variables:
+      SLURM_PARAM_PARTITION: "-p c23ms"
+      SLURM_DPARAM_PARTITION: "-p c23ms"
+
     script:
       - mkdir build
       - time cmake -S ./ -B build -DCMAKE_INSTALL_PREFIX=$PWD/install -DCMAKE_BUILD_TYPE=RelWithDebInfo ${ADD_CMAKE_OPTIONS}
@@ -189,6 +204,11 @@ debian:
 cluster:
     stage: test
     extends: .cluster-template
+
+    variables:
+      SLURM_PARAM_PARTITION: "-p c23ms"
+      SLURM_DPARAM_PARTITION: "-p c23ms"
+
     script:
       - !reference [.cluster-build, script]
       - !reference [.setup-python-env, script]
@@ -197,6 +217,20 @@ cluster:
       - ldd build/src/libCPT.so
       - ldd build/src/libCPT.so | grep -q 'libstdc++' && echo "Error libstdc++ linked" && exit 1 || echo "Info No libstdc++ dependency found"
       - exit $EXIT_CODE
-    artifacts:
-      reports:
-        junit: build/tests/check.xunit.xml
+
+gpu-test:
+    stage: test
+    extends: .cluster-template
+
+    variables:
+      SLURM_PARAM_PARTITION: "-p c23g --gres=gpu:2"
+      SLURM_DPARAM_PARTITION: "-p c23g --gres=gpu:2"
+
+    script:
+      - !reference [.cluster-build, script]
+      - !reference [.setup-python-env, script]
+      - EXIT_CODE=0
+      - time cmake --build build --verbose -- check || EXIT_CODE=$?
+      - ldd build/src/libCPT.so
+      - ldd build/src/libCPT.so | grep -q 'libstdc++' && echo "Error libstdc++ linked" && exit 1 || echo "Info No libstdc++ dependency found"
+      - exit $EXIT_CODE

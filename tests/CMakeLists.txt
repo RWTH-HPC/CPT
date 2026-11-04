@@ -102,7 +102,8 @@ set(TEST_C_COMPILER ${CMAKE_C_COMPILER} CACHE STRING "C Compiler to use for test
 set(TEST_CXX_COMPILER ${CMAKE_CXX_COMPILER} CACHE STRING "C++ Compiler to use for tests")
 set(TEST_Fortran_COMPILER ${CMAKE_Fortran_COMPILER} CACHE STRING "Fortran Compiler to use for tests")
 set(TEST_OPENMP_FLAGS ${OpenMP_C_FLAGS})
-mark_as_advanced(TEST_C_COMPILER TEST_CXX_COMPILER TEST_Fortran_COMPILER)
+set(TEST_CUDA_COMPILER ${CMAKE_CUDA_COMPILER} CACHE STRING "CUDA Compiler to use for tests")
+mark_as_advanced(TEST_C_COMPILER TEST_CXX_COMPILER TEST_Fortran_COMPILER TEST_CUDA_COMPILER)
 
 list(TRANSFORM MPI_C_INCLUDE_DIRS PREPEND "-I" OUTPUT_VARIABLE _incs)
 list(TRANSFORM MPI_C_COMPILE_DEFINITIONS PREPEND "-D" OUTPUT_VARIABLE _defs)
@@ -123,13 +124,13 @@ pythonize_bool(OpenMP_FOUND)
 pythonize_bool(LIT_FORWARD_FULL_ENV)
 pythonize_bool(CPT_HAVE_Fortran)
 pythonize_bool(CPT_ENABLE_FORTRAN_TESTS)
+pythonize_bool(ENABLE_CUDA_SUPPORT)
 
 configure_file(lit.site.cfg.in lit.site.cfg.configured @ONLY)
 file(GENERATE
      OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg"
      INPUT "${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg.configured"
 )
-
 
 add_check_target(NAME check SUITES . COMMENT "Run all CPT tests" DEPENDS build-tests)
 add_check_target(NAME check-omp SUITES omp-only COMMENT "Run omp tests" DEPENDS build-omp-only-tests)

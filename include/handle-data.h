@@ -187,7 +187,7 @@ public:
   // define new/delete operator to avoid dependency to libstdc++
   void *operator new(size_t size, void *ptr) { return ptr; }
 
-private:
+  // private:
   void *operator new(size_t size) { // static_assert(false, "operator new must
                                     // never be called directly");
     DCHECK(false && "operator new must never be called directly");

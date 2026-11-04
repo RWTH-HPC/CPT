@@ -1,5 +1,4 @@
 #include <math.h>
-#include <mpi.h>
 #include <string>
 #include <time.h>
 
@@ -22,6 +21,9 @@ class RaiiTimer {
 
 public:
   RaiiTimer(const std::string &descr) : description(descr) {
+    clock_gettime(CLOCK_MONOTONIC, &start);
+  }
+  RaiiTimer(const char *descr) : description(descr) {
     clock_gettime(CLOCK_MONOTONIC, &start);
   }
   RaiiTimer(int id, const char *descr)
@@ -52,6 +54,10 @@ public:
         (double)(start.tv_sec) + ((double)(start.tv_nsec) / BILLION);
     double endd = (double)(end.tv_sec) + ((double)(end.tv_nsec) / BILLION);
     double elapsed = endd - startd;
+    if (samples == 0) {
+      printf("%-25s elapsed = %1.9f\n", description.c_str(), elapsed);
+      return;
+    }
     double mean = total / samples;
     double stddev2 = (sumsqr / samples) - (mean * mean);
     double error = sqrt(stddev2);

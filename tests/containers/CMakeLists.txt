@@ -8,6 +8,7 @@ set(containerTests
     vector
     string
     compacthashmap
+    eventset
 )
 
 include_directories(../../include)

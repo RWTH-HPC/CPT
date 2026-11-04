@@ -7,6 +7,12 @@ typedef struct metrics {
   int MLB;
   int MSE;
   int MTE;
+#ifdef CUDA_TEST
+  int HDE; // host device (offload) efficiency
+  int DCE;
+  int DLB;
+  int DOE;
+#endif
 } metrics;
 
 #ifndef WORK
@@ -35,6 +41,10 @@ static void printMetrics(struct metrics m) {
   int SE = m.MSE * m.OSE / 1000;
   int TE = m.MTE * m.OTE / 1000;
   int PE = OPE * MPE / 1000;
+#ifdef CUDA_TEST
+  PE = (PE * m.HDE) / 1000;
+  int DPE = m.DCE * m.DLB * m.DOE / 1000 / 1000;
+#endif
   printC(PE);
   printC(LB);
   printC(SE);
@@ -47,6 +57,13 @@ static void printMetrics(struct metrics m) {
   printM(OLB);
   printM(OSE);
   printM(OTE);
+#ifdef CUDA_TEST
+  printM(HDE);
+  printC(DPE);
+  printM(DCE);
+  printM(DLB);
+  printM(DOE);
+#endif
 }
 
 void printmetrics_(int *olb, int *ose, int *ote, int *mlb, int *mse, int *mte) {
@@ -79,6 +96,11 @@ void printmetrics_(int *olb, int *ose, int *ote, int *mlb, int *mse, int *mte) {
 // CHECK-DAG: Expected [[#%d,OLBLB:]] < OLB < [[#%d,OLBUB:]]
 // CHECK-DAG: Expected [[#%d,OSELB:]] < OSE < [[#%d,OSEUB:]]
 // CHECK-DAG: Expected [[#%d,OTELB:]] < OTE < [[#%d,OTEUB:]]
+// CHECKCUDA-DAG: Expected [[#%d,HDELB:]] < HDE < [[#%d,HDEUB:]]
+// CHECKCUDA-DAG: Expected [[#%d,DPELB:]] < DPE < [[#%d,DPEUB:]]
+// CHECKCUDA-DAG: Expected [[#%d,DCELB:]] < DCE < [[#%d,DCEUB:]]
+// CHECKCUDA-DAG: Expected [[#%d,DLBLB:]] < DLB < [[#%d,DLBUB:]]
+// CHECKCUDA-DAG: Expected [[#%d,DOELB:]] < DOE < [[#%d,DOEUB:]]
 
 // CHECK-DAG: Parallel Efficiency:                [[#%d,PE:]]
 // CHECK-DAG:   Load Balance:                     [[#%d,LB:]]
@@ -96,6 +118,12 @@ void printmetrics_(int *olb, int *ose, int *ote, int *mlb, int *mse, int *mte) {
 // CHECK-DAG:       OMP Serialisation Efficiency: [[#%d,OSE:]]
 // CHECK-DAG:       OMP Transfer Efficiency:      [[#%d,OTE:]]
 
+// CHECKCUDA-DAG:   Device Offload Efficiency:        [[#%d,HDE:]]
+// CHECKCUDA-DAG: Device Parallel Efficiency:         [[#%d,DPE:]]
+// CHECKCUDA-DAG:   Communication Efficiency:         [[#%d,DCE:]]
+// CHECKCUDA-DAG:   Load Balance:                     [[#%d,DLB:]]
+// CHECKCUDA-DAG:   Orchestration Efficiency:         [[#%d,DOE:]]
+
 // CHECK-DAG: Expected [[#%d,min(PELB,PE)]] < PE < [[#%d,max(PEUB,PE)]]
 // CHECK-DAG: Expected [[#%d,min(LBLB,LB)]] < LB < [[#%d,max(LBUB,LB)]]
 // CHECK-DAG: Expected [[#%d,min(SELB,SE)]] < SE < [[#%d,max(SEUB,SE)]]
@@ -108,3 +136,8 @@ void printmetrics_(int *olb, int *ose, int *ote, int *mlb, int *mse, int *mte) {
 // CHECK-DAG: Expected [[#%d,min(OLBLB,OLB)]] < OLB < [[#%d,max(OLBUB,OLB)]]
 // CHECK-DAG: Expected [[#%d,min(OSELB,OSE)]] < OSE < [[#%d,max(OSEUB,OSE)]]
 // CHECK-DAG: Expected [[#%d,min(OTELB,OTE)]] < OTE < [[#%d,max(OTEUB,OTE)]]
+// CHECKCUDA-DAG: Expected [[#%d,min(HDELB,HDE)]] < HDE < [[#%d,max(HDEUB,HDE)]]
+// CHECKCUDA-DAG: Expected [[#%d,min(DPELB,DPE)]] < DPE < [[#%d,max(DPEUB,DPE)]]
+// CHECKCUDA-DAG: Expected [[#%d,min(DCELB,DCE)]] < DCE < [[#%d,max(DCEUB,DCE)]]
+// CHECKCUDA-DAG: Expected [[#%d,min(DLBLB,DLB)]] < DLB < [[#%d,max(DLBUB,DLB)]]
+// CHECKCUDA-DAG: Expected [[#%d,min(DOELB,DOE)]] < DOE < [[#%d,max(DOEUB,DOE)]]

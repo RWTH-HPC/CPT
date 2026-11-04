@@ -28,6 +28,7 @@ int main(int argc, char **argv) {
 
   if (rank < size - 1)
     MPI_Send(&sum, 1, MPI_INT, rank + 1, 42, MPI_COMM_WORLD);
+  MPI_Barrier(MPI_COMM_WORLD);
   MPI_Pcontrol(0);
 
   MPI_Finalize();

@@ -19,6 +19,29 @@
 #include <omp-tools.h>
 #include <omp.h>
 
+#ifdef USE_CUDA
+#include "cuda-tracking.h"
+#endif
+
+// For debugging
+static const char *ompt_scope_endpoint_t_values[] = {
+    "", "ompt_scope_begin", "ompt_scope_end", "ompt_scope_beginend"};
+
+static const char *ompt_target_t_values[] = {"",
+                                             "ompt_target",
+                                             "ompt_target_enter_data",
+                                             "ompt_target_exit_data",
+                                             "ompt_target_update",
+                                             "",
+                                             "",
+                                             "",
+                                             "",
+                                             "",
+                                             "ompt_target_nowait",
+                                             "ompt_target_enter_data_nowait",
+                                             "ompt_target_exit_data_nowait",
+                                             "ompt_target_update_nowait"};
+
 // Define attribute that indicates that the fall through from the previous
 // case label is intentional and should not be diagnosed by a compiler
 //   Code from libcxx/include/__config
@@ -39,7 +62,10 @@ static ompt_get_thread_data_t critical_ompt_get_thread_data{};
 
 static int hasTaskCreation = 0;
 
+// static TargetOmptCounts;
 static __thread omptCounts *omptThreadCount;
+
+// thread_local KernelData *thread_local_taskdata = nullptr;
 
 struct ompTimer {
   const char *loc;
@@ -51,130 +77,7 @@ struct ompTimer {
   ~ompTimer() { thread_local_clock->exitState(loc); }
 };
 
-static int pagesize{0};
-
-// Data structure to provide a threadsafe pool of reusable objects.
-// DataPool<Type of objects>
-template <typename T> struct DataPool final {
-  static __thread DataPool<T> *ThreadDataPool;
-  std::mutex DPMutex{};
-
-  // store unused objects
-  Vector<T *> DataPointer{};
-  Vector<T *> RemoteDataPointer{};
-
-  // store all allocated memory to finally release
-  Vector<void *> memory;
-
-  // count remotely returned data (RemoteDataPointer.size())
-  std::atomic<int> remote{0};
-
-  // totally allocated data objects in pool
-  int total{0};
-#ifdef DEBUG_DATA
-  int remoteReturn{0};
-  int localReturn{0};
-
-  int getRemote() { return remoteReturn + remote; }
-  int getLocal() { return localReturn; }
-#endif
-  int getTotal() { return total; }
-  int getMissing() {
-    return total - DataPointer.size() - RemoteDataPointer.size();
-  }
-
-  // fill the pool by allocating a page of memory
-  void newDatas() {
-    if (remote > 0) {
-      const std::lock_guard<std::mutex> lock(DPMutex);
-      // DataPointer is empty, so just swap the vectors
-      DataPointer.swap(RemoteDataPointer);
-      remote = 0;
-      return;
-    }
-    // calculate size of an object including padding to cacheline size
-    size_t elemSize = sizeof(T);
-    size_t paddedSize = (((elemSize - 1) / 64) + 1) * 64;
-    // number of padded elements to allocate
-    int ndatas = pagesize / paddedSize;
-    if (ndatas < 4)
-      ndatas = 4;
-    char *datas = (char *)malloc(ndatas * paddedSize);
-    memory.push_back(datas);
-    for (int i = 0; i < ndatas; i++) {
-      DataPointer.push_back(new (datas + i * paddedSize) T(this));
-    }
-    total += ndatas;
-  }
-
-  // get data from the pool
-  T *getData() {
-    T *ret;
-    if (DataPointer.empty())
-      newDatas();
-    ret = DataPointer.back();
-    DataPointer.pop_back();
-    return ret;
-  }
-
-  // accesses to the thread-local datapool don't need locks
-  void returnOwnData(T *data) {
-    DataPointer.push_back(data);
-#ifdef DEBUG_DATA
-    localReturn++;
-#endif
-  }
-
-  // returning to a remote datapool using lock
-  void returnData(T *data) {
-    const std::lock_guard<std::mutex> lock(DPMutex);
-    RemoteDataPointer.push_back(data);
-    remote++;
-#ifdef DEBUG_DATA
-    remoteReturn++;
-#endif
-  }
-
-  ~DataPool() {
-    // we assume all memory is returned when the thread finished / destructor is
-    // called
-    if (analysis_flags->report_data_leak && getMissing() != 0) {
-      fprintf(stderr,
-              "ERROR: While freeing DataPool (%s) we are missing %i data "
-              "objects.\n",
-              __PRETTY_FUNCTION__, getMissing());
-      exit(-3);
-    }
-    for (auto i : DataPointer)
-      if (i)
-        i->~T();
-    for (auto i : RemoteDataPointer)
-      if (i)
-        i->~T();
-    for (auto i : memory)
-      if (i)
-        free(i);
-  }
-  void *operator new(size_t size) { return malloc(size); }
-
-  void operator delete(void *p) { free(p); }
-};
-
-template <typename T> struct DataPoolEntry {
-  DataPool<T> *owner;
-
-  static T *New() { return DataPool<T>::ThreadDataPool->getData(); }
-
-  void Delete() {
-    static_cast<T *>(this)->Reset();
-    if (owner == DataPool<T>::ThreadDataPool)
-      owner->returnOwnData(static_cast<T *>(this));
-    else
-      owner->returnData(static_cast<T *>(this));
-  }
-
-  DataPoolEntry(DataPool<T> *dp) : owner(dp) {}
-};
+int __cpt::pagesize{4096};
 
 struct DependencyData;
 typedef DataPool<DependencyData> DependencyDataPool;
@@ -192,7 +95,11 @@ struct DependencyData final : DataPoolEntry<DependencyData> {
 
   void Reset() {}
 
-  static DependencyData *New() { return DataPoolEntry<DependencyData>::New(); }
+  static DependencyData *New() {
+    if (!DependencyDataPool::ThreadDataPool)
+      DependencyDataPool::ThreadDataPool = new DependencyDataPool();
+    return DataPoolEntry<DependencyData>::New();
+  }
 
   DependencyData(DataPool<DependencyData> *dp)
       : DataPoolEntry<DependencyData>(dp) {}
@@ -206,30 +113,56 @@ struct TaskDependency {
   TaskDependency(DependencyData *depData, ompt_dependence_type_t type)
       : inPtr(depData->GetInPtr()), outPtr(depData->GetOutPtr()),
         inoutsetPtr(depData->GetInoutsetPtr()), type(type) {}
-  void AnnotateBegin() {
+  void AnnotateBegin(THREAD_CLOCK *tc = thread_local_clock) {
     if (type == ompt_dependence_type_out ||
         type == ompt_dependence_type_inout ||
         type == ompt_dependence_type_mutexinoutset) {
-      OmpHappensAfter(inPtr);
-      OmpHappensAfter(outPtr);
-      OmpHappensAfter(inoutsetPtr);
+      OmpHappensAfter(inPtr, tc);
+      OmpHappensAfter(outPtr, tc);
+      OmpHappensAfter(inoutsetPtr, tc);
     } else if (type == ompt_dependence_type_in) {
-      OmpHappensAfter(outPtr);
-      OmpHappensAfter(inoutsetPtr);
+      OmpHappensAfter(outPtr, tc);
+      OmpHappensAfter(inoutsetPtr, tc);
     } else if (type == ompt_dependence_type_inoutset) {
-      OmpHappensAfter(inPtr);
-      OmpHappensAfter(outPtr);
+      OmpHappensAfter(inPtr, tc);
+      OmpHappensAfter(outPtr, tc);
     }
   }
-  void AnnotateEnd() {
+  void AnnotateEnd(THREAD_CLOCK *tc = thread_local_clock) {
     if (type == ompt_dependence_type_out ||
         type == ompt_dependence_type_inout ||
         type == ompt_dependence_type_mutexinoutset) {
-      OmpHappensBefore(outPtr);
+      OmpHappensBefore(outPtr, tc);
     } else if (type == ompt_dependence_type_in) {
-      OmpHappensBefore(inPtr);
+      OmpHappensBefore(inPtr, tc);
     } else if (type == ompt_dependence_type_inoutset) {
-      OmpHappensBefore(inoutsetPtr);
+      OmpHappensBefore(inoutsetPtr, tc);
+    }
+  }
+  void GpuAnnotateBegin(THREAD_CLOCK *tc = thread_local_clock) {
+    if (type == ompt_dependence_type_out ||
+        type == ompt_dependence_type_inout ||
+        type == ompt_dependence_type_mutexinoutset) {
+      GpuHappensAfter(inPtr, tc);
+      GpuHappensAfter(outPtr, tc);
+      GpuHappensAfter(inoutsetPtr, tc);
+    } else if (type == ompt_dependence_type_in) {
+      GpuHappensAfter(outPtr, tc);
+      GpuHappensAfter(inoutsetPtr, tc);
+    } else if (type == ompt_dependence_type_inoutset) {
+      GpuHappensAfter(inPtr, tc);
+      GpuHappensAfter(outPtr, tc);
+    }
+  }
+  void GpuAnnotateEnd(THREAD_CLOCK *tc = thread_local_clock) {
+    if (type == ompt_dependence_type_out ||
+        type == ompt_dependence_type_inout ||
+        type == ompt_dependence_type_mutexinoutset) {
+      GpuHappensBefore(outPtr, tc);
+    } else if (type == ompt_dependence_type_in) {
+      GpuHappensBefore(inPtr, tc);
+    } else if (type == ompt_dependence_type_inoutset) {
+      GpuHappensBefore(inoutsetPtr, tc);
     }
   }
 };
@@ -261,6 +194,8 @@ struct ParallelData final : DataPoolEntry<ParallelData> {
   void Reset() {}
 
   static ParallelData *New(const void *codeptr) {
+    if (!ParallelDataPool::ThreadDataPool)
+      ParallelDataPool::ThreadDataPool = new ParallelDataPool();
     return DataPoolEntry<ParallelData>::New()->Init(codeptr);
   }
 
@@ -293,6 +228,8 @@ struct Taskgroup final : DataPoolEntry<Taskgroup> {
   void Reset() {}
 
   static Taskgroup *New(Taskgroup *Parent) {
+    if (!TaskgroupPool::ThreadDataPool)
+      TaskgroupPool::ThreadDataPool = new TaskgroupPool();
     return DataPoolEntry<Taskgroup>::New()->Init(Parent);
   }
 
@@ -306,7 +243,7 @@ template <> __thread TaskDataPool *TaskDataPool::ThreadDataPool = nullptr;
 enum CptTaskFlag { CptTaskFulfilled = 0x00010000 };
 
 /// Data structure to store additional information for tasks.
-struct TaskData final : DataPoolEntry<TaskData> {
+struct TaskData final : DataPoolEntry<TaskData>, KernelData {
   /// Its address is used for relationships of this task.
   ompt_tsan_clockid Task{0};
 
@@ -359,6 +296,13 @@ struct TaskData final : DataPoolEntry<TaskData> {
   // We expect a rare need for the dependency-map, so alloc on demand
   CompactHashMap<void *, DependencyData *> *DependencyMap{nullptr};
 
+  /// TODO THREAD_CLOCK for target tasks - moved to target_data
+  THREAD_CLOCK *TargetThreadClock{nullptr};
+
+  double StartTime{0};
+
+  /// Device id
+  int device_num;
 #ifdef DEBUG
   int freed{0};
 #endif
@@ -381,17 +325,23 @@ struct TaskData final : DataPoolEntry<TaskData> {
 
   ompt_tsan_clockid *GetTaskwaitPtr() { return &Taskwait; }
 
-  TaskData *Init(TaskData *parent, int taskType) {
+  TaskData *Init(TaskData *parent, int taskType, THREAD_CLOCK *threadClock,
+                 int deviceNum) {
     isRunning = analysis_flags->running;
     TaskType = taskType;
     Parent = parent;
     Team = Parent->Team;
+    ImplicitTask = Parent->ImplicitTask;
     if (Parent != nullptr) {
       Parent->RefCount++;
       // Copy over pointer to taskgroup. This task may set up its own stack
       // but for now belongs to its parent's taskgroup.
       TaskGroup = Parent->TaskGroup;
     }
+    if (threadClock) {
+      TargetThreadClock = threadClock;
+    }
+    device_num = deviceNum;
     return this;
   }
 
@@ -412,6 +362,78 @@ struct TaskData final : DataPoolEntry<TaskData> {
     Team = team;
     ThreadNum = threadNum;
     return this;
+  }
+
+  void freeTask() {
+    TaskData *task = this;
+    while (task != nullptr && --task->RefCount == 0) {
+      TaskData *Parent = task->Parent;
+      task->Delete();
+      task = Parent;
+    }
+  }
+
+  void releaseDependencies(THREAD_CLOCK *tc_arg) {
+    TaskData *task = this;
+    for (unsigned i = 0; i < task->DependencyCount; i++) {
+      task->Dependencies[i].AnnotateEnd(tc_arg);
+    }
+  }
+
+  void acquireDependencies(THREAD_CLOCK *tc_arg) {
+    TaskData *task = this;
+    for (unsigned i = 0; i < task->DependencyCount; i++) {
+      task->Dependencies[i].AnnotateBegin(tc_arg);
+    }
+  }
+
+  void gpuReleaseDependencies(THREAD_CLOCK *tc_arg) {
+    TaskData *task = this;
+    for (unsigned i = 0; i < task->DependencyCount; i++) {
+      task->Dependencies[i].GpuAnnotateEnd(tc_arg);
+    }
+  }
+
+  void gpuAcquireDependencies(THREAD_CLOCK *tc_arg) {
+    TaskData *task = this;
+    for (unsigned i = 0; i < task->DependencyCount; i++) {
+      task->Dependencies[i].GpuAnnotateBegin(tc_arg);
+    }
+  }
+
+  void finish(double dur, uint32_t streamId, uint32_t deviceId = 0) {
+    // finish simulates starting, execution, and completion of the kernel
+    // finish also frees the KernelData
+    auto streamClock = getOrCreateStreamClock(streamId, deviceId);
+
+    gpuAcquireDependencies(streamClock);
+
+    GpuHappensAfter(GetTaskPtr(), streamClock);
+    // TODO: Fix clock context
+    GpuExecKernel(streamClock, dur);
+
+    // if (!isMerged()) {
+    if (Team && Parent) {
+      // sync "task local" tlc with regular tlc
+      ParallelData *PData = Team;
+      GpuHappensBefore(PData->GetBarrierPtr(ImplicitTask->BarrierIndex),
+                       streamClock);
+
+      // ... and before an eventual taskwait by the parent thread.
+      GpuHappensBefore(Parent->GetTaskwaitPtr(), streamClock);
+    }
+
+    if (TaskGroup != nullptr) {
+      // This task is part of a taskgroup, so it will finish before the
+      // corresponding taskgroup_end.
+      GpuHappensBefore(TaskGroup->GetPtr(), streamClock);
+    }
+
+    gpuReleaseDependencies(streamClock);
+    freeTask();
+    // } else {
+    //   GpuHappensBefore(GetTaskPtr(), streamClock);
+    // }
   }
 
   void Reset() {
@@ -436,20 +458,32 @@ struct TaskData final : DataPoolEntry<TaskData> {
       free(Dependencies);
     Dependencies = nullptr;
     DependencyCount = 0;
+    StartTime = 0;
+    TargetThreadClock = nullptr;
 #ifdef DEBUG
     freed = 0;
 #endif
   }
-
-  static TaskData *New(TaskData *parent, int taskType) {
-    return DataPoolEntry<TaskData>::New()->Init(parent, taskType);
+  // explicit task
+  static TaskData *New(TaskData *parent, int taskType,
+                       THREAD_CLOCK *threadClock = nullptr,
+                       int deviceNum = -1) {
+    if (!TaskDataPool::ThreadDataPool)
+      TaskDataPool::ThreadDataPool = new TaskDataPool();
+    return DataPoolEntry<TaskData>::New()->Init(parent, taskType, threadClock,
+                                                deviceNum);
   }
 
+  // initial task from task_create
   static TaskData *New(ParallelData *team, int taskType) {
+    if (!TaskDataPool::ThreadDataPool)
+      TaskDataPool::ThreadDataPool = new TaskDataPool();
     return DataPoolEntry<TaskData>::New()->Init(team, taskType);
   }
-
+  // implicit/initial task from implicit_task_begin
   static TaskData *New(ParallelData *team, int threadNum, int taskType) {
+    if (!TaskDataPool::ThreadDataPool)
+      TaskDataPool::ThreadDataPool = new TaskDataPool();
     return DataPoolEntry<TaskData>::New()->Init(team, threadNum, taskType);
   }
 
@@ -457,7 +491,14 @@ struct TaskData final : DataPoolEntry<TaskData> {
 };
 
 static inline TaskData *ToTaskData(ompt_data_t *task_data) {
+  if (!task_data)
+    return nullptr;
   return reinterpret_cast<TaskData *>(task_data->ptr);
+}
+
+// TODO for detached target tasks whose pseudo tcs we want to access
+static inline THREAD_CLOCK *ToThreadClock(ompt_data_t *target_data) {
+  return reinterpret_cast<THREAD_CLOCK *>(target_data->ptr);
 }
 
 /*
@@ -467,7 +508,8 @@ static inline TaskData *ToTaskData(ompt_data_t *task_data) {
 /// Store a mutex for each wait_id to resolve race condition with callbacks.
 CompactHashMap<ompt_wait_id_t, Pair<std::mutex, ompt_tsan_clockid> *> Locks;
 std::mutex LocksMutex;
-std::mutex tcmutex;
+std::mutex omptcmutex;
+std::mutex tgtcmutex;
 
 static void ompt_tsan_thread_begin(ompt_thread_t thread_type,
                                    ompt_data_t *thread_data) {
@@ -477,13 +519,15 @@ static void ompt_tsan_thread_begin(ompt_thread_t thread_type,
   DependencyDataPool::ThreadDataPool = new DependencyDataPool;
 
   omptThreadCount = new omptCounts();
+  // Worker threads are identified as openmp thread when they execute an
+  // implicit task
   if (!thread_local_clock)
-    thread_local_clock = new THREAD_CLOCK(my_next_id(), 0, true);
+    thread_local_clock = new THREAD_CLOCK(my_next_id(), 0);
   thread_data->ptr = thread_local_clock;
   {
-    const std::lock_guard<std::mutex> lock(tcmutex);
-    thread_clocks->push_back(thread_local_clock);
-    thread_counts->push_back(omptThreadCount);
+    const std::lock_guard<std::mutex> lock(omptcmutex);
+    omp_thread_clocks->push_back(thread_local_clock);
+    omp_thread_counts->push_back(omptThreadCount);
   }
   if (thread_type == ompt_thread_initial)
     thread_local_clock->enterState(STATE_OMP, __func__);
@@ -742,7 +786,7 @@ static void ompt_tsan_task_create(
 
     Data = TaskData::New(PData, type);
     new_task_data->ptr = Data;
-  } else if (type & ompt_task_undeferred) {
+  } else if (type & ompt_task_undeferred && !(type & ompt_task_target)) {
     Data = TaskData::New(ToTaskData(parent_task_data), type);
     new_task_data->ptr = Data;
   } else if (type & ompt_task_explicit || type & ompt_task_target) {
@@ -1042,11 +1086,100 @@ static void ompt_tsan_mutex_released(ompt_mutex_t kind, ompt_wait_id_t wait_id,
   Lock->first.unlock();
 }
 
+static void ompt_tsan_device_initialize(int device_num, const char *type,
+                                        ompt_device_t *device,
+                                        ompt_function_lookup_t lookup,
+                                        const char *documentation) {}
+
+static void ompt_tsan_target_submit_emi(ompt_scope_endpoint_t endpoint,
+                                        ompt_data_t *target_data,
+                                        ompt_id_t *host_op_id,
+                                        unsigned int requested_num_teams) {
+  if (endpoint == ompt_scope_begin) {
+    thread_local_taskdata = ToTaskData(target_data);
+    if (!ToTaskData(target_data)->isMerged())
+      target_data->ptr = nullptr;
+#ifdef USE_CUDA
+    PushCuptiCid((uint64_t)thread_local_taskdata);
+#endif
+  } else {
+    thread_local_taskdata = nullptr;
+#ifdef USE_CUDA
+    PopCuptiCid();
+#endif
+  }
+}
+
+static void ompt_tsan_target_emi(ompt_target_t kind,
+                                 ompt_scope_endpoint_t endpoint, int device_num,
+                                 ompt_data_t *task_data,
+                                 ompt_data_t *target_task_data,
+                                 ompt_data_t *target_data,
+                                 const void *codeptr_ra) {
+  if (analysis_flags->verbose)
+    printf("%s: %s, %s, %p, %p\n", __func__, ompt_target_t_values[kind],
+           ompt_scope_endpoint_t_values[endpoint], target_task_data->ptr,
+           target_data->ptr);
+
+  TaskData *Data;
+
+  if (endpoint == ompt_scope_begin) {
+    // thread_local_clock->StopNested(CLOCK_OMP, "ompt_tsan_target_emi");
+    thread_local_clock->enterState(STATE_OMP, __func__);
+
+    if (kind != ompt_target && kind != ompt_target_nowait)
+      return;
+
+    if (!target_task_data || !target_task_data->ptr) { // without nowait
+      Data = TaskData::New(ToTaskData(task_data),
+                           ompt_task_target | ompt_task_merged,
+                           thread_local_clock, device_num);
+      GpuHappensBefore(Data->GetTaskPtr());
+      target_data->ptr = Data;
+    } else { // nowait
+      Data = ToTaskData(target_task_data);
+      Data->device_num = device_num;
+      target_data->ptr = Data;
+      target_task_data->ptr = nullptr;
+    }
+  }
+
+  if (endpoint == ompt_scope_end) {
+    // Data = ToTaskData(target_data);
+    // if (Data && Data->isMerged()) {
+    //   GpuHappensAfter(Data->GetTaskPtr());
+    //   Data->freeTask();
+    // }
+
+    // thread_local_clock->StartNested(CLOCK_OMP, "ompt_tsan_target_emi");
+    thread_local_clock->exitState(__func__);
+  }
+}
+
+static void ompt_tsan_ompx_target_kernel(ompt_scope_endpoint_t endpoint,
+                                         ompt_data_t *target_task_data,
+                                         ompt_data_t *target_data) {
+  if (analysis_flags->verbose)
+    printf("%s: %s, %p, %p\n", __func__, ompt_scope_endpoint_t_values[endpoint],
+           target_task_data->ptr, target_data->ptr);
+
+  TaskData *Data;
+
+  assert(target_data && target_data->ptr);
+  Data = ToTaskData(target_data);
+
+  if (endpoint == ompt_scope_begin) {
+    Data->StartTime = getTime();
+  } else if (endpoint == ompt_scope_end) {
+    Data->finish(getTime() - Data->StartTime, -1);
+  }
+}
+
 // callback , signature , variable to store result , required support level
 #define SET_OPTIONAL_CALLBACK_T(event, type, result, level)                    \
   do {                                                                         \
     ompt_callback_##type##_t tsan_##event = &ompt_tsan_##event;                \
-    result = ompt_set_callback(ompt_callback_##event,                          \
+    result = ompt_set_callback((ompt_callbacks_t)ompt_callback_##event,        \
                                (ompt_callback_t)tsan_##event);                 \
     if (result < level)                                                        \
       printf("Registered callback '" #event "' is not supported at " #level    \
@@ -1062,8 +1195,19 @@ static void ompt_tsan_mutex_released(ompt_mutex_t kind, ompt_wait_id_t wait_id,
 
 #define SET_CALLBACK(event) SET_CALLBACK_T(event, event)
 
+typedef void (*ompt_callback_ompx_target_kernel_t)(
+    ompt_scope_endpoint_t endpoint, ompt_data_t *target_task_data,
+    ompt_data_t *target_data);
+static int ompt_callback_ompx_target_kernel = 38;
+
 static int ompt_tsan_initialize(ompt_function_lookup_t lookup, int device_num,
                                 ompt_data_t *tool_data) {
+  if (!CheckRequestedAnalysis(AT_OMP)) {
+    if (analysis_flags->verbose) {
+      fprintf(analysis_flags->output,
+              "OpenMP runtime detected, but no OpenMP analysis requested.\n");
+    }
+  }
 
   ompt_set_callback_t ompt_set_callback =
       (ompt_set_callback_t)lookup("ompt_set_callback");
@@ -1103,6 +1247,18 @@ static int ompt_tsan_initialize(ompt_function_lookup_t lookup, int device_num,
   SET_CALLBACK_T(mutex_acquired, mutex);
   SET_CALLBACK_T(mutex_released, mutex);
 
+  // Target callbacks
+  SET_CALLBACK(device_initialize);
+  SET_CALLBACK(target_emi);
+  int hasTargetKernel;
+  SET_OPTIONAL_CALLBACK_T(ompx_target_kernel, ompx_target_kernel,
+                          hasTargetKernel, ompt_set_never);
+  if (!hasTargetKernel) {
+    SET_CALLBACK(target_submit_emi);
+  }
+
+  ActivateAnalysis(AT_OMP);
+
   if (!thread_local_clock)
     thread_local_clock = new THREAD_CLOCK(my_next_id(), 0);
   startTool(false);
@@ -1110,7 +1266,7 @@ static int ompt_tsan_initialize(ompt_function_lookup_t lookup, int device_num,
 }
 
 static void ompt_tsan_finalize(ompt_data_t *tool_data) {
-  if (!useMpi) {
+  if (!CheckAnalysis(AT_MPI)) {
     if (analysis_flags->verbose)
       fprintf(analysis_flags->output, "Max Useful Computation -- %2.5lf\n",
               crit_path_useful_time);
@@ -1143,10 +1299,10 @@ ompt_start_tool(unsigned int omp_version, const char *runtime_version) {
 
   static ompt_start_tool_result_t ompt_start_tool_result = {
       &ompt_tsan_initialize, &ompt_tsan_finalize, {0}};
-  if (!thread_clocks)
-    thread_clocks = new Vector<THREAD_CLOCK *>{};
-  if (!thread_counts)
-    thread_counts = new Vector<omptCounts *>{};
+  if (!omp_thread_clocks)
+    omp_thread_clocks = new Vector<THREAD_CLOCK *>{};
+  if (!omp_thread_counts)
+    omp_thread_counts = new Vector<omptCounts *>{};
 
   // The OMPT start-up code uses dlopen with RTLD_LAZY. Therefore, we cannot
   // rely on dlopen to fail if TSan is missing, but would get a runtime error

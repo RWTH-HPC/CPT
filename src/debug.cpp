@@ -1,7 +1,5 @@
 #include "debug.h"
-
 #include "containers.h"
-#include "parse_flags.h"
 #include "typedefs.h"
 #include <execinfo.h>
 
@@ -12,9 +10,25 @@
 #include <sstream>
 #endif
 
+#ifndef STANDALONEDBG // if built with CPT
+#include "parse_flags.h"
 using namespace __cpt;
 
 std::atomic<uint32_t> current_verbosity{0};
+
+#else // for independent use of this file
+struct debugFlags {
+  FILE *output{stdout};
+  bool abort_on_error{false};
+  bool continue_on_error{true};
+  int exitcode{-1};
+};
+
+debugFlags debugFlagsInstance;
+
+inline debugFlags *get_cpt_flags() { return &debugFlagsInstance; }
+
+#endif
 
 // fast and safe way to print a stacktrace
 void PrintStack() {

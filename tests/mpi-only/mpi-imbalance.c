@@ -21,6 +21,7 @@ int main(int argc, char **argv) {
   }
   MPI_Pcontrol(1);
   usleep(WORK * (1 + 2 * rank));
+  MPI_Barrier(MPI_COMM_WORLD);
   MPI_Pcontrol(0);
   MPI_Finalize();
 }

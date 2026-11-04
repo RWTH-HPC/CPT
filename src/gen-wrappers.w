@@ -9,7 +9,7 @@
   InitializeCptFlags();
   if (analysis_flags->verbose)
      printf("Starting critPathAnalysis tool\n");
-  useMpi = true;
+  ActivateAnalysis(AT_MPI);
 
   mpiTimer mt{true, __func__};
 

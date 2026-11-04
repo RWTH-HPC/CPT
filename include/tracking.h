@@ -151,8 +151,9 @@ public:
 };
 
 #ifdef REAL_DATAPOOL
+
 // Memory management for ToolData
-template <typename M, typename T> class DataPool {
+template <typename M, typename T> class TrackingDataPool {
 private:
   mutable std::shared_mutex DPMutex{};
   Vector<T *> dataPointer{};
@@ -180,7 +181,7 @@ public:
     std::unique_lock<std::shared_mutex> lock(DPMutex);
     dataPointer.push_back(data);
   }
-  virtual ~DataPool() {
+  virtual ~TrackingDataPool() {
     for (auto i : this->dataPointer)
       if (i)
         i->~T();
@@ -194,7 +195,7 @@ public:
 };
 #else
 // No memory management for ToolData, just use new/delete
-template <typename M, typename T> class DataPool {
+template <typename M, typename T> class TrackingDataPool {
 public:
   virtual T *getData() { return new T(); }
   virtual void returnData(T *data) { delete data; }
@@ -222,7 +223,8 @@ template <typename D> class RequestFactoryInst {
 // Specialized template of HandleFactory for pointer-type handles
 template <typename M, typename T, typename MI, auto E>
 class HandleFactory<M, T, MI *, E>
-    : public virtual AbstractHandleFactory<M, T, E>, public DataPool<M, T> {
+    : public virtual AbstractHandleFactory<M, T, E>,
+      public TrackingDataPool<M, T> {
 protected:
   mutable std::shared_mutex DummyMutex{};
 
@@ -438,7 +440,8 @@ public:
 // Specialized template of HandleFactory for int-type handles
 template <typename M, typename T, auto E>
 class HandleFactory<M, T, int, E>
-    : public virtual AbstractHandleFactory<M, T, E>, public DataPool<M, T> {
+    : public virtual AbstractHandleFactory<M, T, E>,
+      public TrackingDataPool<M, T> {
 protected:
   mutable std::shared_mutex DTMutex{};
   mutable std::shared_mutex AHMutex{};

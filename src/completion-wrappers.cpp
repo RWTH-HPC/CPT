@@ -1,6 +1,7 @@
 #include <mpi.h>
 #include <stdio.h>
 
+#include "criticalPath.h"
 #include "mpi-critical.h"
 #include "tracking.h"
 

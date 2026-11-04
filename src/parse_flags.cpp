@@ -1,4 +1,6 @@
 #include "parse_flags.h"
+#include <assert.h>
+#include <mutex>
 
 using namespace __cpt;
 
